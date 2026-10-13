@@ -1,78 +1,14 @@
-import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Response
-from pydantic import field_validator
+from fastapi import FastAPI, HTTPException, Query, Response
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlmodel import Field, Session, SQLModel, col, create_engine, select
+from sqlmodel import SQLModel
 
-
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-class ItemBase(SQLModel):
-    name: str = Field(min_length=1, max_length=100)
-    price: float = Field(gt=0)
-    description: str | None = None
-
-
-class Item(ItemBase, table=True):
-    # The database assigns the id, so it is None until the item is saved
-    id: int | None = Field(default=None, primary_key=True)
-    created_at: datetime = Field(default_factory=utc_now)
-    updated_at: datetime = Field(default_factory=utc_now)
-
-
-class ItemCreate(ItemBase):
-    pass
-
-
-class ItemPublic(ItemBase):
-    id: int
-    created_at: datetime
-    updated_at: datetime
-
-    # SQLite drops the time zone when it stores a datetime; all stored times are UTC
-    @field_validator("created_at", "updated_at")
-    @classmethod
-    def assume_utc(cls, value: datetime) -> datetime:
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value
-
-
-class ItemUpdate(SQLModel):
-    name: str | None = Field(default=None, min_length=1, max_length=100)
-    price: float | None = Field(default=None, gt=0)
-    description: str | None = None
-
-    # Omitting name or price is fine, but an explicit null would break the NOT NULL column
-    @field_validator("name", "price")
-    @classmethod
-    def reject_null(cls, value):
-        if value is None:
-            raise ValueError("cannot be null")
-        return value
-
-
-# "or" also covers DATABASE_URL set to an empty string
-DATABASE_URL = os.getenv("DATABASE_URL") or "sqlite:///database.db"
-
-# check_same_thread=False: FastAPI runs sync endpoints in a thread pool (SQLite only)
-connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, connect_args=connect_args)
-
-
-def get_session():
-    with Session(engine) as session:
-        yield session
-
-
-SessionDep = Annotated[Session, Depends(get_session)]
+from catalog import get_item_or_404, search_items
+from database import SessionDep, engine
+from models import Item, ItemCreate, ItemPublic, ItemUpdate, utc_now
 
 
 @asynccontextmanager
@@ -82,13 +18,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
-
-
-def get_item_or_404(session: Session, item_id: int) -> Item:
-    item = session.get(Item, item_id)
-    if item is None:
-        raise HTTPException(status_code=404, detail="Item not found")
-    return item
 
 
 @app.get("/")
@@ -129,18 +58,14 @@ def list_items(
         raise HTTPException(
             status_code=422, detail="min_price cannot be greater than max_price"
         )
-
-    statement = select(Item)
-    if name:
-        # autoescape: % and _ in the search text are matched literally, not as wildcards
-        statement = statement.where(col(Item.name).icontains(name, autoescape=True))
-    if min_price is not None:
-        statement = statement.where(Item.price >= min_price)
-    if max_price is not None:
-        statement = statement.where(Item.price <= max_price)
-
-    statement = statement.order_by(Item.id).offset(offset).limit(limit)
-    return session.exec(statement).all()
+    return search_items(
+        session,
+        name=name,
+        min_price=min_price,
+        max_price=max_price,
+        offset=offset,
+        limit=limit,
+    )
 
 
 @app.get("/items/{item_id}", response_model=ItemPublic)

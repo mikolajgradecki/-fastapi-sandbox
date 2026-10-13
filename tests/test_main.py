@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session, SQLModel, create_engine, select
 from sqlmodel.pool import StaticPool
 
+import database
 import main
 import seed
 
@@ -30,7 +31,7 @@ def test_db():
         with Session(engine) as session:
             yield session
 
-    main.app.dependency_overrides[main.get_session] = get_test_session
+    main.app.dependency_overrides[database.get_session] = get_test_session
     yield
     main.app.dependency_overrides.clear()
     engine.dispose()
@@ -60,7 +61,7 @@ def test_health_database_unavailable(tmp_path):
         with Session(broken_engine) as session:
             yield session
 
-    main.app.dependency_overrides[main.get_session] = get_broken_session
+    main.app.dependency_overrides[database.get_session] = get_broken_session
 
     response = client.get("/health")
     assert response.status_code == 503
@@ -246,9 +247,9 @@ def test_update_item_with_negative_price():
 
 
 def engine_url_for(env):
-    # main reads DATABASE_URL at import time, so check it in a fresh Python process
+    # database reads DATABASE_URL at import time, so check it in a fresh Python process
     result = subprocess.run(
-        [sys.executable, "-c", "import main; print(main.engine.url)"],
+        [sys.executable, "-c", "import database; print(database.engine.url)"],
         cwd=Path(__file__).parent.parent,
         env=env,
         capture_output=True,
