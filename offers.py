@@ -8,7 +8,6 @@ from decimal import Decimal
 
 from sqlmodel import Session, select
 
-import ai
 from ai import RequestSpec, Selection
 from guard import find_suspicious, merge_flags, safe_text
 from models import (
@@ -148,13 +147,13 @@ def render_reply(
     return "\n".join(parts)
 
 
-def process_email(client, session: Session, email_text: str) -> Offer:
-    """The whole agent: extraction and selection by Gemini, then validation and saving."""
-    spec = ai.extract_request(client, email_text)
+def process_email(llm, session: Session, email_text: str) -> Offer:
+    """The whole agent: extraction and selection by the LLM provider, then validation and saving."""
+    spec = llm.extract_request(email_text)
     questions = clarifying_questions(spec)
     # Unclear lines are not guessed: only clear ones go to product selection
     clear = spec.model_copy(update={"lines": [line for line in spec.lines if line.is_clear]})
-    selection = ai.select_products(client, session, clear) if clear.lines else Selection(choices=[])
+    selection = llm.select_products(session, clear) if clear.lines else Selection(choices=[])
     return create_offer(session, email_text, clear, selection, questions)
 
 

@@ -1,4 +1,5 @@
 fastapi[standard]==0.142.2
 sqlmodel==0.0.48
 google-genai==2.30.1
+anthropic==1.13.0
 python-dotenv==1.2.4

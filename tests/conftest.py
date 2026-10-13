@@ -6,6 +6,14 @@ import database
 import main
 
 
+@pytest.fixture(autouse=True)
+def no_real_llm(monkeypatch):
+    # .env and system variables may hold real keys; no test may reach a paid API
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    for name in ("GEMINI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "GEMINI_MODEL", "ANTHROPIC_MODEL"):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def db_engine():
     # A fresh in-memory database for every test, so tests don't affect each other.
