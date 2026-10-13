@@ -58,7 +58,7 @@ def submit(*choices):
 
 
 def use_gemini(fake):
-    main.app.dependency_overrides[main.ai_client] = lambda: fake
+    main.app.dependency_overrides[main.ai_client] = lambda: ai.GeminiProvider(fake)
     return fake
 
 

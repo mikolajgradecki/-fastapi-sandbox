@@ -1,14 +1,16 @@
-"""Gemini steps of the offer agent.
+"""LLM steps of the offer agent, with Gemini or Anthropic (LLM_PROVIDER).
 
 Step 1, extract_request: structured output turns the e-mail into a RequestSpec.
 Step 2, select_products: tool calling loop, the model searches the catalog and submits its choices.
 Step 3 (validation) is plain code in offers.py, the model's answer is never trusted as is.
+Both providers get the same instructions, the same tools and the same output models.
 """
 
 import json
 import os
 import re
 
+import anthropic
 from dotenv import load_dotenv
 from google import genai
 from google.genai import errors, types
@@ -21,27 +23,49 @@ from models import Item, to_money
 load_dotenv()
 
 DEFAULT_MODEL = "gemini-3.8-flash"
+ANTHROPIC_DEFAULT_MODEL = "claude-haiku-5-5"
+ANTHROPIC_MAX_TOKENS = 16000
+PROVIDERS = ("gemini", "anthropic")
 MAX_TOOL_ROUNDS = 10
 SEARCH_RESULTS_LIMIT = 10
 
 
 class AIConfigError(Exception):
-    """The AI client cannot be created, e.g. GEMINI_API_KEY is missing."""
+    """The AI client cannot be created, e.g. the API key is missing."""
 
 
 class AIError(Exception):
-    """Gemini failed or returned something unusable."""
+    """The model or its API failed or returned something unusable."""
 
 
-def get_client() -> genai.Client:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise AIConfigError("Brak GEMINI_API_KEY. Dodaj klucz do pliku .env (wzór w .env.example).")
-    return genai.Client(api_key=api_key)
+def provider_name() -> str:
+    return (os.getenv("LLM_PROVIDER") or "gemini").strip().lower()
+
+
+def get_client():
+    """The provider chosen by LLM_PROVIDER. Keys are read from the environment, never printed."""
+    provider = provider_name()
+    if provider == "gemini":
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise AIConfigError("Brak GEMINI_API_KEY. Dodaj klucz do pliku .env (wzór w .env.example).")
+        return GeminiProvider(genai.Client(api_key=api_key))
+    if provider == "anthropic":
+        if not os.getenv("ANTHROPIC_API_KEY"):
+            raise AIConfigError(
+                "Brak ANTHROPIC_API_KEY. Dodaj klucz do pliku .env albo do zmiennych środowiskowych."
+            )
+        # The SDK reads ANTHROPIC_API_KEY itself, so the key never passes through this code
+        return AnthropicProvider(anthropic.Anthropic())
+    raise AIConfigError(f"Nieznany LLM_PROVIDER: {provider}. Dozwolone: {', '.join(PROVIDERS)}.")
 
 
 def model_name() -> str:
     return os.getenv("GEMINI_MODEL") or DEFAULT_MODEL
+
+
+def anthropic_model_name() -> str:
+    return os.getenv("ANTHROPIC_MODEL") or ANTHROPIC_DEFAULT_MODEL
 
 
 def flat_schema(model: type[BaseModel]) -> dict:
@@ -142,36 +166,49 @@ Jeśli nic nie pasuje albo stan magazynowy jest za mały, ustaw item_id na null 
 Na koniec wywołaj submit_selection z jednym wyborem dla każdej pozycji.
 """
 
+# One definition of the tools, translated below into each provider's format
+TOOL_SPECS = [
+    {
+        "name": "search_items",
+        "description": "Szuka produktów w katalogu. Zwraca id, nazwę, kategorię, cenę netto i stan magazynowy.",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Słowa z nazwy produktu"},
+                "category": {"type": "string", "description": "Kategoria z katalogu"},
+                "max_price": {"type": "number", "description": "Maksymalna cena netto"},
+            },
+        },
+    },
+    {
+        "name": "get_item",
+        "description": "Zwraca jeden produkt po id.",
+        "schema": {
+            "type": "object",
+            "properties": {"id": {"type": "integer"}},
+            "required": ["id"],
+        },
+    },
+    {
+        "name": "submit_selection",
+        "description": "Przekazuje końcowy dobór produktów. Wywołaj raz, na końcu.",
+        "schema": flat_schema(Selection),
+    },
+]
+
 TOOLS = types.Tool(
     function_declarations=[
         types.FunctionDeclaration(
-            name="search_items",
-            description="Szuka produktów w katalogu. Zwraca id, nazwę, kategorię, cenę netto i stan magazynowy.",
-            parameters_json_schema={
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Słowa z nazwy produktu"},
-                    "category": {"type": "string", "description": "Kategoria z katalogu"},
-                    "max_price": {"type": "number", "description": "Maksymalna cena netto"},
-                },
-            },
-        ),
-        types.FunctionDeclaration(
-            name="get_item",
-            description="Zwraca jeden produkt po id.",
-            parameters_json_schema={
-                "type": "object",
-                "properties": {"id": {"type": "integer"}},
-                "required": ["id"],
-            },
-        ),
-        types.FunctionDeclaration(
-            name="submit_selection",
-            description="Przekazuje końcowy dobór produktów. Wywołaj raz, na końcu.",
-            parameters_json_schema=flat_schema(Selection),
-        ),
+            name=spec["name"], description=spec["description"], parameters_json_schema=spec["schema"]
+        )
+        for spec in TOOL_SPECS
     ]
 )
+
+ANTHROPIC_TOOLS = [
+    {"name": spec["name"], "description": spec["description"], "input_schema": spec["schema"]}
+    for spec in TOOL_SPECS
+]
 
 
 def _generate(client, contents, config) -> types.GenerateContentResponse:
@@ -234,11 +271,28 @@ def run_tool(session: Session, name: str, args: dict) -> dict:
     return {"error": f"Nieznane narzędzie {name}"}
 
 
+def request_block(spec: RequestSpec) -> str:
+    request = [
+        {"request_index": index, **line.model_dump()} for index, line in enumerate(spec.lines)
+    ]
+    return "<pozycje_zapytania>\n" + json.dumps(request, ensure_ascii=False) + "\n</pozycje_zapytania>"
+
+
+def select_instruction(session: Session) -> str:
+    return SELECT_INSTRUCTION.format(categories=", ".join(list_categories(session)) or "brak")
+
+
+def parse_selection(args) -> tuple[Selection | None, dict | None]:
+    """The model's submit_selection call: the Selection, or an error to send back for a retry."""
+    try:
+        return Selection.model_validate(args), None
+    except ValidationError as error:
+        return None, {"error": f"Zły format wyboru, popraw i wyślij ponownie: {error}"}
+
+
 def select_products(client, session: Session, spec: RequestSpec) -> Selection:
     config = types.GenerateContentConfig(
-        system_instruction=SELECT_INSTRUCTION.format(
-            categories=", ".join(list_categories(session)) or "brak"
-        ),
+        system_instruction=select_instruction(session),
         tools=[TOOLS],
         # ANY: the model must answer with a tool call, so the loop always ends in submit_selection
         tool_config=types.ToolConfig(
@@ -247,21 +301,7 @@ def select_products(client, session: Session, spec: RequestSpec) -> Selection:
         # The tools need the database session, so this loop runs them instead of the SDK
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
-    request = [
-        {"request_index": index, **line.model_dump()} for index, line in enumerate(spec.lines)
-    ]
-    contents = [
-        types.Content(
-            role="user",
-            parts=[
-                types.Part(
-                    text="<pozycje_zapytania>\n"
-                    + json.dumps(request, ensure_ascii=False)
-                    + "\n</pozycje_zapytania>"
-                )
-            ],
-        )
-    ]
+    contents = [types.Content(role="user", parts=[types.Part(text=request_block(spec))])]
 
     for _ in range(MAX_TOOL_ROUNDS):
         response = _generate(client, contents, config)
@@ -275,10 +315,9 @@ def select_products(client, session: Session, spec: RequestSpec) -> Selection:
         for call in calls:
             args = call.args or {}
             if call.name == "submit_selection":
-                try:
-                    return Selection.model_validate(args)
-                except ValidationError as error:
-                    result = {"error": f"Zły format wyboru, popraw i wyślij ponownie: {error}"}
+                selection, result = parse_selection(args)
+                if selection is not None:
+                    return selection
             else:
                 result = run_tool(session, call.name, args)
             results.append(
@@ -289,3 +328,125 @@ def select_products(client, session: Session, spec: RequestSpec) -> Selection:
         contents.append(types.Content(role="user", parts=results))
 
     raise AIError(f"Model nie zakończył doboru produktów w {MAX_TOOL_ROUNDS} krokach.")
+
+
+# Anthropic
+
+
+def _anthropic_call(method, **kwargs):
+    try:
+        response = method(model=anthropic_model_name(), max_tokens=ANTHROPIC_MAX_TOKENS, **kwargs)
+    except anthropic.APIStatusError as error:
+        raise AIError(f"Anthropic API zwróciło błąd {error.status_code}: {error.message}") from error
+    except anthropic.APIConnectionError as error:
+        raise AIError("Brak połączenia z Anthropic API.") from error
+    except ValidationError as error:
+        # messages.parse validates the output against the Pydantic model
+        raise AIError("Model zwrócił zapytanie w złym formacie.") from error
+    if response.stop_reason == "refusal":
+        raise AIError("Model odmówił odpowiedzi.")
+    if response.stop_reason == "max_tokens":
+        raise AIError("Odpowiedź modelu została ucięta (limit tokenów).")
+    return response
+
+
+def anthropic_extract_request(client, email_text: str) -> RequestSpec:
+    response = _anthropic_call(
+        client.messages.parse,
+        system=EXTRACT_INSTRUCTION,
+        messages=[{"role": "user", "content": wrap_email(email_text)}],
+        output_format=RequestSpec,
+    )
+    if response.parsed_output is None:
+        raise AIError("Model zwrócił zapytanie w złym formacie.")
+    return response.parsed_output
+
+
+def anthropic_select_products(client, session: Session, spec: RequestSpec) -> Selection:
+    system = select_instruction(session)
+    messages = [{"role": "user", "content": request_block(spec)}]
+    reminded = False
+
+    for _ in range(MAX_TOOL_ROUNDS):
+        response = _anthropic_call(
+            client.messages.create, system=system, tools=ANTHROPIC_TOOLS, messages=messages
+        )
+        # The whole content goes back, thinking blocks included
+        messages.append({"role": "assistant", "content": response.content})
+        tool_uses = [block for block in response.content if block.type == "tool_use"]
+
+        if not tool_uses:
+            # tool_choice stays "auto" (newer models reject forcing a tool), so remind once
+            if reminded:
+                raise AIError("Model nie wywołał żadnego narzędzia.")
+            reminded = True
+            messages.append(
+                {"role": "user", "content": "Zakończ, wywołując submit_selection z wyborem dla każdej pozycji."}
+            )
+            continue
+
+        results = []
+        for block in tool_uses:
+            args = block.input if isinstance(block.input, dict) else {}
+            if block.name == "submit_selection":
+                selection, result = parse_selection(args)
+                if selection is not None:
+                    return selection
+            else:
+                result = run_tool(session, block.name, args)
+            results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": json.dumps(result, ensure_ascii=False),
+                    "is_error": "error" in result,
+                }
+            )
+        # All results of one turn in one message, so the model keeps making parallel calls
+        messages.append({"role": "user", "content": results})
+
+    raise AIError(f"Model nie zakończył doboru produktów w {MAX_TOOL_ROUNDS} krokach.")
+
+
+# Providers: the same two steps behind one interface, used by offers.process_email
+
+
+class GeminiProvider:
+    name = "gemini"
+
+    def __init__(self, client):
+        self.client = client
+
+    def extract_request(self, email_text: str) -> RequestSpec:
+        return extract_request(self.client, email_text)
+
+    def select_products(self, session: Session, spec: RequestSpec) -> Selection:
+        return select_products(self.client, session, spec)
+
+
+class AnthropicProvider:
+    name = "anthropic"
+
+    def __init__(self, client):
+        self.client = client
+
+    def extract_request(self, email_text: str) -> RequestSpec:
+        return anthropic_extract_request(self.client, email_text)
+
+    def select_products(self, session: Session, spec: RequestSpec) -> Selection:
+        return anthropic_select_products(self.client, session, spec)
+
+
+class UnavailableProvider:
+    """Stands in when the provider cannot be configured; fails on first use."""
+
+    name = "unavailable"
+
+    def __init__(self, reason: str):
+        self.reason = reason
+
+    def extract_request(self, email_text: str) -> RequestSpec:
+        raise AIConfigError(self.reason)
+
+    def select_products(self, session: Session, spec: RequestSpec) -> Selection:
+        raise AIConfigError(self.reason)

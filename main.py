@@ -118,19 +118,23 @@ def delete_item(item_id: int, session: SessionDep):
 
 
 def ai_client():
+    # Dependencies run before body validation, so a missing key must not fail here:
+    # a bad request still gets 422, and the config error comes out when the model is used
     try:
         return ai.get_client()
     except ai.AIConfigError as error:
-        raise HTTPException(status_code=503, detail=str(error)) from error
+        return ai.UnavailableProvider(str(error))
 
 
 AIClientDep = Annotated[object, Depends(ai_client)]
 
 
 @app.post("/offers/from-email", status_code=201, response_model=OfferPublic)
-def create_offer_from_email(request: OfferRequest, session: SessionDep, client: AIClientDep):
+def create_offer_from_email(request: OfferRequest, session: SessionDep, llm: AIClientDep):
     try:
-        offer = offers.process_email(client, session, request.email_text)
+        offer = offers.process_email(llm, session, request.email_text)
+    except ai.AIConfigError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     except ai.AIError as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
     return offers.offer_public(session, offer)
