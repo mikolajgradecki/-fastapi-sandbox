@@ -108,7 +108,7 @@ def test_offer_from_email_happy_path(catalog):
     response = post_email()
     assert response.status_code == 201
     offer = response.json()
-    assert offer["status"] == "complete"
+    assert offer["availability"] == "complete"
     assert offer["missing"] == []
     assert [(line["item_id"], line["quantity"], line["unit_price"], line["line_total"]) for line in offer["lines"]] == [
         (dell["id"], 10, "899.00", "8990.00"),
@@ -146,7 +146,7 @@ def test_invented_item_id_goes_to_missing(catalog):
     )
 
     offer = post_email().json()
-    assert offer["status"] == "partial"
+    assert offer["availability"] == "partial"
     assert offer["missing"] == [
         {
             "requested": "monitor 27 cali",
@@ -190,7 +190,7 @@ def test_quantity_above_stock_goes_to_missing(catalog, product, quantity, reason
     )
 
     offer = post_email().json()
-    assert offer["status"] == "unavailable"
+    assert offer["availability"] == "unavailable"
     assert offer["lines"] == []
     assert offer["missing"][0]["reason"] == reason
     assert offer["total"] == "0.00"
@@ -230,7 +230,7 @@ def test_no_product_and_skipped_line_go_to_missing(catalog):
     )
 
     offer = post_email().json()
-    assert offer["status"] == "unavailable"
+    assert offer["availability"] == "unavailable"
     assert [line["reason"] for line in offer["missing"]] == [
         "Brak monitorów 27 cali na stanie.",
         "Agent nie dobrał produktu do tej pozycji.",
@@ -247,7 +247,7 @@ def test_bad_selection_format_gets_a_second_chance(catalog):
     )
 
     offer = post_email().json()
-    assert offer["status"] == "complete"
+    assert offer["availability"] == "complete"
     error = fake.models.requests[2]["contents"][-1].parts[0].function_response.response
     assert "Zły format wyboru" in error["error"]
 
@@ -512,5 +512,91 @@ def test_clear_request_has_no_questions(catalog):
 
     offer = post_email().json()
     assert offer["clarifying_questions"] == []
-    assert offer["status"] == "partial"
+    assert offer["availability"] == "partial"
     assert "doprecyzowanie" not in offer["reply_draft"]
+
+
+# Human in the loop: approve and reject
+
+
+@pytest.fixture
+def draft(catalog):
+    use_gemini(
+        FakeGemini(json_response(SPEC), submit({"request_index": 0, "item_id": catalog["Dell"]["id"]}))
+    )
+    return post_email().json()
+
+
+def test_new_offer_is_a_draft_without_email_to_send(draft):
+    assert draft["status"] == "draft"
+    assert draft["email_to_send"] is None
+    assert draft["decided_at"] is None
+    assert draft["rejection_reason"] is None
+    assert draft["reply_draft"].startswith("Dzień dobry,")
+
+
+def test_approve_makes_the_email_ready_to_send(draft):
+    response = client.post(f"/offers/{draft['id']}/approve")
+    assert response.status_code == 200
+    offer = response.json()
+    assert offer["status"] == "approved"
+    assert offer["email_to_send"] == draft["reply_draft"]
+    assert offer["decided_at"] is not None
+    assert offer["availability"] == draft["availability"]
+    # The decision is saved
+    assert client.get(f"/offers/{draft['id']}").json() == offer
+
+
+def test_reject_saves_the_reason_and_sends_nothing(draft):
+    response = client.post(f"/offers/{draft['id']}/reject", json={"reason": "  Klient ma umowę ramową z innym rabatem.  "})
+    assert response.status_code == 200
+    offer = response.json()
+    assert offer["status"] == "rejected"
+    assert offer["rejection_reason"] == "Klient ma umowę ramową z innym rabatem."
+    assert offer["email_to_send"] is None
+    assert offer["decided_at"] is not None
+
+
+@pytest.mark.parametrize("body", [{}, {"reason": ""}, {"reason": "   "}, {"reason": "x" * 501}])
+def test_reject_needs_a_reason(draft, body):
+    response = client.post(f"/offers/{draft['id']}/reject", json=body)
+    assert response.status_code == 422
+    assert client.get(f"/offers/{draft['id']}").json()["status"] == "draft"
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        ("approve", "approve"),
+        ("approve", "reject"),
+        ("reject", "approve"),
+        ("reject", "reject"),
+    ],
+)
+def test_decision_is_final(draft, first, second):
+    body = {"reason": "Za drogo dla klienta."}
+    assert client.post(f"/offers/{draft['id']}/{first}", json=body).status_code == 200
+
+    response = client.post(f"/offers/{draft['id']}/{second}", json=body)
+    assert response.status_code == 409
+    expected = "approved" if first == "approve" else "rejected"
+    assert response.json() == {"detail": f"Oferta ma już status {expected}."}
+
+
+@pytest.mark.parametrize("action, body", [("approve", None), ("reject", {"reason": "Brak."})])
+def test_decide_unknown_offer_is_404(action, body):
+    response = client.post(f"/offers/999/{action}", json=body)
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Offer not found"}
+
+
+def test_offer_with_questions_can_be_approved(catalog):
+    use_gemini(FakeGemini(json_response({"lines": [{"description": "monitor", "quantity": None}]})))
+    offer = post_email("Proszę o monitory.").json()
+    assert offer["status"] == "needs_clarification"
+    assert offer["availability"] == "unavailable"
+
+    # The salesperson can send the questions to the customer
+    approved = client.post(f"/offers/{offer['id']}/approve").json()
+    assert approved["status"] == "approved"
+    assert "Ile sztuk potrzebują Państwo: monitor?" in approved["email_to_send"]

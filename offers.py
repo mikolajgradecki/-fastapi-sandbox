@@ -11,6 +11,7 @@ from sqlmodel import Session, select
 from ai import RequestSpec, Selection
 from guard import find_suspicious, merge_flags, safe_text
 from models import (
+    Availability,
     Item,
     Offer,
     OfferLine,
@@ -19,6 +20,7 @@ from models import (
     OfferPublic,
     OfferStatus,
     to_money,
+    utc_now,
 )
 
 
@@ -72,13 +74,13 @@ def validate_selection(session: Session, spec: RequestSpec, selection: Selection
     return lines
 
 
-def offer_status(lines: list[OfferLine]) -> OfferStatus:
+def availability(lines: list[OfferLine]) -> Availability:
     offered = [line for line in lines if line.item_id is not None]
     if offered and len(offered) == len(lines):
-        return OfferStatus.complete
+        return Availability.complete
     if offered:
-        return OfferStatus.partial
-    return OfferStatus.unavailable
+        return Availability.partial
+    return Availability.unavailable
 
 
 def format_pln(amount: Decimal) -> str:
@@ -172,7 +174,9 @@ def create_offer(
     )
     offer = Offer(
         customer_email_text=email_text,
-        status=OfferStatus.needs_clarification if questions else offer_status(lines),
+        # The agent only ever writes a draft; approving is a person's job
+        status=OfferStatus.needs_clarification if questions else OfferStatus.draft,
+        availability=availability(lines),
         total=total,
         reply_draft=render_reply(lines, spec, total, questions),
         clarifying_questions=list(questions),
@@ -189,6 +193,26 @@ def create_offer(
     return offer
 
 
+class OfferAlreadyDecided(Exception):
+    pass
+
+
+OPEN_STATUSES = (OfferStatus.draft, OfferStatus.needs_clarification)
+
+
+def decide(session: Session, offer: Offer, approve: bool, reason: str | None = None) -> Offer:
+    """Approves or rejects an offer that is still waiting. A decision is final."""
+    if offer.status not in OPEN_STATUSES:
+        raise OfferAlreadyDecided(f"Oferta ma już status {offer.status.value}.")
+    offer.status = OfferStatus.approved if approve else OfferStatus.rejected
+    offer.rejection_reason = None if approve else reason
+    offer.decided_at = utc_now()
+    session.add(offer)
+    session.commit()
+    session.refresh(offer)
+    return offer
+
+
 def offer_public(session: Session, offer: Offer) -> OfferPublic:
     lines = session.exec(
         select(OfferLine).where(OfferLine.offer_id == offer.id).order_by(OfferLine.id)
@@ -196,6 +220,7 @@ def offer_public(session: Session, offer: Offer) -> OfferPublic:
     return OfferPublic(
         id=offer.id,
         status=offer.status,
+        availability=offer.availability,
         total=offer.total,
         lines=[
             OfferLinePublic(
@@ -219,5 +244,8 @@ def offer_public(session: Session, offer: Offer) -> OfferPublic:
         flags=offer.flags,
         clarifying_questions=offer.clarifying_questions,
         reply_draft=offer.reply_draft,
+        email_to_send=offer.reply_draft if offer.status == OfferStatus.approved else None,
+        rejection_reason=offer.rejection_reason,
         created_at=offer.created_at,
+        decided_at=offer.decided_at,
     )
