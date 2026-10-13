@@ -3,7 +3,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from enum import Enum
 
 from pydantic import field_validator
-from sqlalchemy import Integer
+from sqlalchemy import JSON, Integer
 from sqlalchemy.types import TypeDecorator
 from sqlmodel import Field, SQLModel
 
@@ -114,6 +114,8 @@ class Offer(SQLModel, table=True):
     status: OfferStatus
     total: Decimal = Field(sa_type=Money)
     reply_draft: str
+    # Suspicious fragments of the e-mail (discount requests, instructions for the AI)
+    flags: list[str] = Field(default_factory=list, sa_type=JSON)
     created_at: datetime = Field(default_factory=utc_now)
 
 
@@ -160,6 +162,7 @@ class OfferPublic(SQLModel):
     total: Decimal
     lines: list[OfferLinePublic]
     missing: list[OfferMissingPublic]
+    flags: list[str]
     reply_draft: str
     created_at: datetime
 

@@ -130,11 +130,9 @@ AIClientDep = Annotated[object, Depends(ai_client)]
 @app.post("/offers/from-email", status_code=201, response_model=OfferPublic)
 def create_offer_from_email(request: OfferRequest, session: SessionDep, client: AIClientDep):
     try:
-        spec = ai.extract_request(client, request.email_text)
-        selection = ai.select_products(client, session, spec)
+        offer = offers.process_email(client, session, request.email_text)
     except ai.AIError as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
-    offer = offers.create_offer(session, request.email_text, spec, selection)
     return offers.offer_public(session, offer)
 
 

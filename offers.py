@@ -8,7 +8,9 @@ from decimal import Decimal
 
 from sqlmodel import Session, select
 
+import ai
 from ai import RequestSpec, Selection
+from guard import find_suspicious, merge_flags, safe_text
 from models import (
     Item,
     Offer,
@@ -86,9 +88,17 @@ def format_pln(amount: Decimal) -> str:
 
 
 def render_reply(lines: list[OfferLine], spec: RequestSpec, total: Decimal) -> str:
-    """Reply e-mail built only from validated data, so it cannot contain an invented price."""
+    """Reply e-mail built only from validated data, so it cannot contain an invented price.
+
+    Product names and prices come from the catalog. Text that came from the e-mail
+    (what the customer asked for, the deadline) goes through safe_text first.
+    """
     offered = [line for line in lines if line.item_id is not None]
     missing = [line for line in lines if line.item_id is None]
+    position = {id(line): number for number, line in enumerate(lines, start=1)}
+
+    def requested(line: OfferLine) -> str:
+        return safe_text(line.requested) or f"pozycja nr {position[id(line)]} z zapytania"
 
     parts = ["Dzień dobry,", "", "dziękujemy za zapytanie."]
     if offered:
@@ -100,16 +110,24 @@ def render_reply(lines: list[OfferLine], spec: RequestSpec, total: Decimal) -> s
                 f"{format_pln(line.unit_price)} = {format_pln(line_total)}"
             )
             if line.is_substitute:
-                parts.append(f"   Proponujemy jako zamiennik dla: {line.requested}.")
+                parts.append(f"   Proponujemy jako zamiennik dla: {requested(line)}.")
         parts += ["", f"Razem netto: {format_pln(total)}."]
     if missing:
         parts += ["", "Obecnie nie możemy zaoferować:"]
-        parts += [f"- {line.requested} ({line.quantity} szt.)" for line in missing]
+        parts += [f"- {requested(line)} ({line.quantity} szt.)" for line in missing]
         parts.append("Chętnie zaproponujemy inne rozwiązanie.")
-    if offered and spec.deadline:
-        parts += ["", f"Termin dostawy ({spec.deadline}) potwierdzimy po złożeniu zamówienia."]
+    deadline = safe_text(spec.deadline, max_length=60)
+    if offered and deadline:
+        parts += ["", f"Termin dostawy ({deadline}) potwierdzimy po złożeniu zamówienia."]
     parts += ["", "Oferta jest ważna 14 dni.", "", "Pozdrawiamy,", "Dział sprzedaży"]
     return "\n".join(parts)
+
+
+def process_email(client, session: Session, email_text: str) -> Offer:
+    """The whole agent: extraction and selection by Gemini, then validation and saving."""
+    spec = ai.extract_request(client, email_text)
+    selection = ai.select_products(client, session, spec)
+    return create_offer(session, email_text, spec, selection)
 
 
 def create_offer(session: Session, email_text: str, spec: RequestSpec, selection: Selection) -> Offer:
@@ -123,6 +141,8 @@ def create_offer(session: Session, email_text: str, spec: RequestSpec, selection
         status=offer_status(lines),
         total=total,
         reply_draft=render_reply(lines, spec, total),
+        # The model's flags plus the pattern check, in case an injection talked the model out of it
+        flags=merge_flags(spec.flags, find_suspicious(email_text)),
     )
     session.add(offer)
     session.flush()  # assigns offer.id for the lines
@@ -161,6 +181,7 @@ def offer_public(session: Session, offer: Offer) -> OfferPublic:
             for line in lines
             if line.item_id is None
         ],
+        flags=offer.flags,
         reply_draft=offer.reply_draft,
         created_at=offer.created_at,
     )
