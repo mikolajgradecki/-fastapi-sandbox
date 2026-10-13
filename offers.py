@@ -87,7 +87,26 @@ def format_pln(amount: Decimal) -> str:
     return f"{amount:,.2f} zł".replace(",", " ").replace(".", ",")
 
 
-def render_reply(lines: list[OfferLine], spec: RequestSpec, total: Decimal) -> str:
+def clarifying_questions(spec: RequestSpec) -> list[str]:
+    """Questions for the customer. Never empty when a line is unclear or nothing was asked for."""
+    # The model's questions go to the customer, so they get the same check as e-mail text
+    questions = [q for q in (safe_text(q, max_length=200) for q in spec.clarifying_questions) if q]
+    unclear = [line for line in spec.lines if not line.is_clear]
+    if not spec.lines:
+        return questions or ["Jakie produkty i w jakich ilościach mamy uwzględnić w ofercie?"]
+    if unclear and not questions:
+        for line in unclear:
+            what = safe_text(line.description) or "jedna z pozycji zapytania"
+            if line.quantity is None:
+                questions.append(f"Ile sztuk potrzebują Państwo: {what}?")
+            else:
+                questions.append(f"Prosimy o doprecyzowanie (model, parametry): {what}.")
+    return questions
+
+
+def render_reply(
+    lines: list[OfferLine], spec: RequestSpec, total: Decimal, questions: list[str] = ()
+) -> str:
     """Reply e-mail built only from validated data, so it cannot contain an invented price.
 
     Product names and prices come from the catalog. Text that came from the e-mail
@@ -102,7 +121,8 @@ def render_reply(lines: list[OfferLine], spec: RequestSpec, total: Decimal) -> s
 
     parts = ["Dzień dobry,", "", "dziękujemy za zapytanie."]
     if offered:
-        parts += ["Przesyłamy ofertę (ceny netto):", ""]
+        intro = "Przesyłamy ofertę na pozycje, które możemy już wycenić" if questions else "Przesyłamy ofertę"
+        parts += [f"{intro} (ceny netto):", ""]
         for number, line in enumerate(offered, start=1):
             line_total = line.unit_price * line.quantity
             parts.append(
@@ -116,21 +136,36 @@ def render_reply(lines: list[OfferLine], spec: RequestSpec, total: Decimal) -> s
         parts += ["", "Obecnie nie możemy zaoferować:"]
         parts += [f"- {requested(line)} ({line.quantity} szt.)" for line in missing]
         parts.append("Chętnie zaproponujemy inne rozwiązanie.")
+    if questions:
+        parts += ["", "Aby przygotować pełną ofertę, prosimy o doprecyzowanie:"]
+        parts += [f"{number}. {question}" for number, question in enumerate(questions, start=1)]
     deadline = safe_text(spec.deadline, max_length=60)
     if offered and deadline:
         parts += ["", f"Termin dostawy ({deadline}) potwierdzimy po złożeniu zamówienia."]
-    parts += ["", "Oferta jest ważna 14 dni.", "", "Pozdrawiamy,", "Dział sprzedaży"]
+    if offered:
+        parts += ["", "Oferta jest ważna 14 dni."]
+    parts += ["", "Pozdrawiamy,", "Dział sprzedaży"]
     return "\n".join(parts)
 
 
 def process_email(client, session: Session, email_text: str) -> Offer:
     """The whole agent: extraction and selection by Gemini, then validation and saving."""
     spec = ai.extract_request(client, email_text)
-    selection = ai.select_products(client, session, spec)
-    return create_offer(session, email_text, spec, selection)
+    questions = clarifying_questions(spec)
+    # Unclear lines are not guessed: only clear ones go to product selection
+    clear = spec.model_copy(update={"lines": [line for line in spec.lines if line.is_clear]})
+    selection = ai.select_products(client, session, clear) if clear.lines else Selection(choices=[])
+    return create_offer(session, email_text, clear, selection, questions)
 
 
-def create_offer(session: Session, email_text: str, spec: RequestSpec, selection: Selection) -> Offer:
+def create_offer(
+    session: Session,
+    email_text: str,
+    spec: RequestSpec,
+    selection: Selection,
+    questions: list[str] = (),
+) -> Offer:
+    """spec holds only the clear lines; questions cover the rest."""
     lines = validate_selection(session, spec, selection)
     total = sum(
         (line.unit_price * line.quantity for line in lines if line.item_id is not None),
@@ -138,9 +173,10 @@ def create_offer(session: Session, email_text: str, spec: RequestSpec, selection
     )
     offer = Offer(
         customer_email_text=email_text,
-        status=offer_status(lines),
+        status=OfferStatus.needs_clarification if questions else offer_status(lines),
         total=total,
-        reply_draft=render_reply(lines, spec, total),
+        reply_draft=render_reply(lines, spec, total, questions),
+        clarifying_questions=list(questions),
         # The model's flags plus the pattern check, in case an injection talked the model out of it
         flags=merge_flags(spec.flags, find_suspicious(email_text)),
     )
@@ -182,6 +218,7 @@ def offer_public(session: Session, offer: Offer) -> OfferPublic:
             if line.item_id is None
         ],
         flags=offer.flags,
+        clarifying_questions=offer.clarifying_questions,
         reply_draft=offer.reply_draft,
         created_at=offer.created_at,
     )
