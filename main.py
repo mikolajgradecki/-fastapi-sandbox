@@ -2,7 +2,7 @@ import os
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import field_validator
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
@@ -91,8 +91,13 @@ def create_item(item: ItemCreate, session: SessionDep):
 
 
 @app.get("/items", response_model=list[ItemPublic])
-def list_items(session: SessionDep):
-    return session.exec(select(Item).order_by(Item.id)).all()
+def list_items(
+    session: SessionDep,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+):
+    statement = select(Item).order_by(Item.id).offset(offset).limit(limit)
+    return session.exec(statement).all()
 
 
 @app.get("/items/{item_id}", response_model=ItemPublic)
