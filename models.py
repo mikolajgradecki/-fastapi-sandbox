@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
+from enum import Enum
 
 from pydantic import field_validator
 from sqlalchemy import Integer
@@ -99,3 +100,67 @@ class ItemUpdate(SQLModel):
     @classmethod
     def lowercase_category(cls, value: str) -> str:
         return normalize_category(value)
+
+
+class OfferStatus(str, Enum):
+    complete = "complete"  # every requested line is in the offer
+    partial = "partial"  # some lines are missing
+    unavailable = "unavailable"  # nothing could be offered
+
+
+class Offer(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    customer_email_text: str
+    status: OfferStatus
+    total: Decimal = Field(sa_type=Money)
+    reply_draft: str
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class OfferLine(SQLModel, table=True):
+    """One requested line of an offer. item_id is None when the line is missing."""
+
+    id: int | None = Field(default=None, primary_key=True)
+    offer_id: int = Field(foreign_key="offer.id", index=True)
+    requested: str
+    quantity: int
+    item_id: int | None = Field(default=None, foreign_key="item.id")
+    # Snapshot, so the offer keeps its wording if the product is renamed later
+    item_name: str | None = None
+    unit_price: Decimal | None = Field(default=None, sa_type=Money)
+    is_substitute: bool = False
+    # Substitute or budget note for offered lines, the reason for missing lines
+    note: str | None = None
+
+
+class OfferRequest(SQLModel):
+    email_text: str = Field(min_length=1, max_length=20000)
+
+
+class OfferLinePublic(SQLModel):
+    item_id: int
+    item_name: str
+    requested: str
+    quantity: int
+    unit_price: Decimal
+    line_total: Decimal
+    is_substitute: bool
+    note: str | None
+
+
+class OfferMissingPublic(SQLModel):
+    requested: str
+    quantity: int
+    reason: str
+
+
+class OfferPublic(SQLModel):
+    id: int
+    status: OfferStatus
+    total: Decimal
+    lines: list[OfferLinePublic]
+    missing: list[OfferMissingPublic]
+    reply_draft: str
+    created_at: datetime
+
+    _utc = field_validator("created_at")(assume_utc)
