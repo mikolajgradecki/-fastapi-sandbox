@@ -4,7 +4,7 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import field_validator
-from sqlmodel import Field, Session, SQLModel, create_engine, select
+from sqlmodel import Field, Session, SQLModel, col, create_engine, select
 
 
 class ItemBase(SQLModel):
@@ -95,8 +95,25 @@ def list_items(
     session: SessionDep,
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    name: str | None = None,
+    min_price: Annotated[float | None, Query(ge=0)] = None,
+    max_price: Annotated[float | None, Query(ge=0)] = None,
 ):
-    statement = select(Item).order_by(Item.id).offset(offset).limit(limit)
+    if min_price is not None and max_price is not None and min_price > max_price:
+        raise HTTPException(
+            status_code=422, detail="min_price cannot be greater than max_price"
+        )
+
+    statement = select(Item)
+    if name:
+        # autoescape: % and _ in the search text are matched literally, not as wildcards
+        statement = statement.where(col(Item.name).icontains(name, autoescape=True))
+    if min_price is not None:
+        statement = statement.where(Item.price >= min_price)
+    if max_price is not None:
+        statement = statement.where(Item.price <= max_price)
+
+    statement = statement.order_by(Item.id).offset(offset).limit(limit)
     return session.exec(statement).all()
 
 
