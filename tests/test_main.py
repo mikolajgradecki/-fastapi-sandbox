@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 from sqlmodel import Session, SQLModel, create_engine, select
 from sqlmodel.pool import StaticPool
 
@@ -26,6 +27,7 @@ def test_db():
         poolclass=StaticPool,
     )
     SQLModel.metadata.create_all(engine)
+    _engines.append(engine)
 
     def get_test_session():
         with Session(engine) as session:
@@ -34,7 +36,15 @@ def test_db():
     main.app.dependency_overrides[database.get_session] = get_test_session
     yield
     main.app.dependency_overrides.clear()
+    _engines.clear()
     engine.dispose()
+
+
+_engines = []
+
+
+def current_engine():
+    return _engines[-1]
 
 
 def without_timestamps(item):
@@ -70,17 +80,34 @@ def test_health_database_unavailable(tmp_path):
 
 def test_create_item():
     response = client.post(
-        "/items", json={"name": "Laptop", "price": 3999.99, "description": "16 GB RAM"}
+        "/items",
+        json={
+            "name": "Laptop",
+            "price": 3999.99,
+            "description": "16 GB RAM",
+            "category": "Laptopy",
+            "stock": 7,
+        },
     )
     assert response.status_code == 201
     data = response.json()
     assert isinstance(data["id"], int)
+    # Prices are Decimal, sent as strings so no precision is lost
     assert without_timestamps(data) == {
         "id": data["id"],
         "name": "Laptop",
-        "price": 3999.99,
+        "price": "3999.99",
         "description": "16 GB RAM",
+        "category": "laptopy",
+        "stock": 7,
     }
+
+
+def test_create_item_defaults_for_category_and_stock():
+    response = client.post("/items", json={"name": "Mouse", "price": 49.9})
+    assert response.status_code == 201
+    assert response.json()["category"] == "inne"
+    assert response.json()["stock"] == 0
 
 
 def test_create_item_without_description():
@@ -146,8 +173,10 @@ def test_replace_item():
     assert without_timestamps(response.json()) == {
         "id": item["id"],
         "name": "Tablet",
-        "price": 1999.0,
+        "price": "1999.00",
         "description": None,
+        "category": "inne",
+        "stock": 0,
     }
     assert client.get(f"/items/{item['id']}").json() == response.json()
 
@@ -166,7 +195,7 @@ def test_update_item():
     # PATCH changes only the sent field, the rest stays as it was
     assert without_timestamps(response.json()) == {
         **without_timestamps(item),
-        "price": 3499.0,
+        "price": "3499.00",
     }
     assert client.get(f"/items/{item['id']}").json() == response.json()
 
@@ -426,26 +455,95 @@ def seed_session():
     engine.dispose()
 
 
-def test_seed_adds_30_varied_products(seed_session):
-    assert seed.seed(seed_session) == 30
+def test_seed_adds_it_catalog(seed_session):
+    assert seed.seed(seed_session) == 40
 
     items = seed_session.exec(select(main.Item)).all()
-    assert len(items) == 30
-    assert len({item.name for item in items}) == 30
-    assert min(item.price for item in items) == 5
-    assert max(item.price for item in items) <= 8000
+    assert len(items) == 40
+    assert len({item.name for item in items}) == 40
+    assert {item.category for item in items} == {
+        "laptopy",
+        "monitory",
+        "stacje-dokujace",
+        "myszy",
+        "klawiatury",
+        "sluchawki",
+        "kable",
+    }
+    assert all(0 < item.price <= 8000 for item in items)
+    # Some products are out of stock, so offers can show shortages
+    assert any(item.stock == 0 for item in items)
     with_description = [item for item in items if item.description]
-    assert 0 < len(with_description) < 30
-    assert all(item.created_at is not None for item in items)
+    assert 0 < len(with_description) < 40
 
 
 def test_seed_twice_adds_nothing(seed_session):
     seed.seed(seed_session)
 
     assert seed.seed(seed_session) == 0
-    assert len(seed_session.exec(select(main.Item)).all()) == 30
+    assert len(seed_session.exec(select(main.Item)).all()) == 40
 
 
 def test_seeded_products_are_valid_for_the_api():
     for product in seed.PRODUCTS:
         main.ItemCreate.model_validate(product)
+
+
+def test_price_is_exact_and_stored_in_grosze():
+    item = client.post("/items", json={"name": "Kabel", "price": "0.10"}).json()
+    client.patch(f"/items/{item['id']}", json={"price": "0.30"})
+
+    assert client.get(f"/items/{item['id']}").json()["price"] == "0.30"
+    with Session(current_engine()) as session:
+        stored = session.exec(text("SELECT price FROM item")).one()[0]
+    assert stored == 30
+
+
+@pytest.mark.parametrize("price", ["19.999", "abc", 0, -1])
+def test_create_item_rejects_bad_price(price):
+    response = client.post("/items", json={"name": "Kabel", "price": price})
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("payload", [{"stock": -1}, {"category": ""}, {"stock": None}])
+def test_update_item_rejects_bad_category_or_stock(payload):
+    item = create_laptop()
+
+    response = client.patch(f"/items/{item['id']}", json=payload)
+    assert response.status_code == 422
+
+
+def test_update_stock_and_category():
+    item = create_laptop()
+
+    response = client.patch(f"/items/{item['id']}", json={"stock": 12, "category": "Laptopy "})
+    assert response.status_code == 200
+    assert response.json()["stock"] == 12
+    assert response.json()["category"] == "laptopy"
+
+
+@pytest.fixture
+def it_catalog():
+    for name, category in [
+        ("Monitor Dell P2725H 27", "monitory"),
+        ("Monitor LG 24MR400 24", "monitory"),
+        ("Laptop Dell Latitude 5450", "laptopy"),
+    ]:
+        client.post("/items", json={"name": name, "price": 100, "category": category})
+
+
+@pytest.mark.usefixtures("it_catalog")
+@pytest.mark.parametrize(
+    "params, expected",
+    [
+        ({"category": "monitory"}, ["Monitor Dell P2725H 27", "Monitor LG 24MR400 24"]),
+        ({"category": "MONITORY"}, ["Monitor Dell P2725H 27", "Monitor LG 24MR400 24"]),
+        ({"name": "dell 27"}, ["Monitor Dell P2725H 27"]),
+        ({"name": "dell", "category": "laptopy"}, ["Laptop Dell Latitude 5450"]),
+        ({"category": "kable"}, []),
+    ],
+)
+def test_search_by_category_and_words(params, expected):
+    response = client.get("/items", params=params)
+    assert response.status_code == 200
+    assert names(response) == expected

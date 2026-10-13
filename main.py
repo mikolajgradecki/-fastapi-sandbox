@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from decimal import Decimal
 from typing import Annotated
 
 from fastapi import FastAPI, HTTPException, Query, Response
@@ -51,8 +52,9 @@ def list_items(
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     name: str | None = None,
-    min_price: Annotated[float | None, Query(ge=0)] = None,
-    max_price: Annotated[float | None, Query(ge=0)] = None,
+    category: str | None = None,
+    min_price: Annotated[Decimal | None, Query(ge=0)] = None,
+    max_price: Annotated[Decimal | None, Query(ge=0)] = None,
 ):
     if min_price is not None and max_price is not None and min_price > max_price:
         raise HTTPException(
@@ -61,6 +63,7 @@ def list_items(
     return search_items(
         session,
         name=name,
+        category=category,
         min_price=min_price,
         max_price=max_price,
         offset=offset,
