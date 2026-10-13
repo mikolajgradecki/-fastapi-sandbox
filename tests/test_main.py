@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone
 import subprocess
 import sys
 from pathlib import Path
@@ -34,6 +35,10 @@ def test_db():
     engine.dispose()
 
 
+def without_timestamps(item):
+    return {k: v for k, v in item.items() if k not in ("created_at", "updated_at")}
+
+
 def test_root():
     response = client.get("/")
     assert response.status_code == 200
@@ -53,7 +58,7 @@ def test_create_item():
     assert response.status_code == 201
     data = response.json()
     assert isinstance(data["id"], int)
-    assert data == {
+    assert without_timestamps(data) == {
         "id": data["id"],
         "name": "Laptop",
         "price": 3999.99,
@@ -121,7 +126,7 @@ def test_replace_item():
     response = client.put(f"/items/{item['id']}", json={"name": "Tablet", "price": 1999.0})
     assert response.status_code == 200
     # PUT replaces the whole item, so the omitted description is cleared
-    assert response.json() == {
+    assert without_timestamps(response.json()) == {
         "id": item["id"],
         "name": "Tablet",
         "price": 1999.0,
@@ -142,7 +147,10 @@ def test_update_item():
     response = client.patch(f"/items/{item['id']}", json={"price": 3499.0})
     assert response.status_code == 200
     # PATCH changes only the sent field, the rest stays as it was
-    assert response.json() == {**item, "price": 3499.0}
+    assert without_timestamps(response.json()) == {
+        **without_timestamps(item),
+        "price": 3499.0,
+    }
     assert client.get(f"/items/{item['id']}").json() == response.json()
 
 
@@ -151,7 +159,10 @@ def test_update_item_clears_description():
 
     response = client.patch(f"/items/{item['id']}", json={"description": None})
     assert response.status_code == 200
-    assert response.json() == {**item, "description": None}
+    assert without_timestamps(response.json()) == {
+        **without_timestamps(item),
+        "description": None,
+    }
 
 
 def test_update_item_not_found():
@@ -334,3 +345,49 @@ def test_search_min_price_greater_than_max_price():
 def test_search_invalid_price_filter(params):
     response = client.get("/items", params=params)
     assert response.status_code == 422
+
+
+def parse_time(value):
+    return datetime.fromisoformat(value)
+
+
+def test_create_item_sets_timestamps():
+    before = datetime.now(timezone.utc)
+    item = create_laptop()
+    after = datetime.now(timezone.utc)
+
+    created_at = parse_time(item["created_at"])
+    assert created_at.tzinfo is not None
+    assert before <= created_at <= after
+    assert item["updated_at"] == item["created_at"]
+
+
+def test_timestamps_survive_reading_from_database():
+    item = create_laptop()
+
+    fetched = client.get(f"/items/{item['id']}").json()
+    assert fetched["created_at"] == item["created_at"]
+    assert client.get("/items").json()[0]["created_at"] == item["created_at"]
+
+
+@pytest.mark.parametrize(
+    "method, payload",
+    [("put", {"name": "Tablet", "price": 1999.0}), ("patch", {"price": 3499.0})],
+)
+def test_update_changes_only_updated_at(method, payload):
+    item = create_laptop()
+
+    response = client.request(method, f"/items/{item['id']}", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["created_at"] == item["created_at"]
+    assert parse_time(data["updated_at"]) > parse_time(item["updated_at"])
+
+
+def test_client_cannot_set_timestamps():
+    response = client.post(
+        "/items",
+        json={"name": "Mouse", "price": 49.9, "created_at": "2000-01-01T00:00:00Z"},
+    )
+    assert response.status_code == 201
+    assert not response.json()["created_at"].startswith("2000")

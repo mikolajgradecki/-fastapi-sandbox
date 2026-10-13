@@ -1,10 +1,15 @@
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import field_validator
 from sqlmodel import Field, Session, SQLModel, col, create_engine, select
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class ItemBase(SQLModel):
@@ -16,6 +21,8 @@ class ItemBase(SQLModel):
 class Item(ItemBase, table=True):
     # The database assigns the id, so it is None until the item is saved
     id: int | None = Field(default=None, primary_key=True)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class ItemCreate(ItemBase):
@@ -24,6 +31,16 @@ class ItemCreate(ItemBase):
 
 class ItemPublic(ItemBase):
     id: int
+    created_at: datetime
+    updated_at: datetime
+
+    # SQLite drops the time zone when it stores a datetime; all stored times are UTC
+    @field_validator("created_at", "updated_at")
+    @classmethod
+    def assume_utc(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
 
 
 class ItemUpdate(SQLModel):
@@ -83,7 +100,8 @@ async def health():
 
 @app.post("/items", status_code=201, response_model=ItemPublic)
 def create_item(item: ItemCreate, session: SessionDep):
-    db_item = Item.model_validate(item)
+    now = utc_now()
+    db_item = Item.model_validate(item, update={"created_at": now, "updated_at": now})
     session.add(db_item)
     session.commit()
     session.refresh(db_item)
@@ -126,7 +144,7 @@ def get_item(item_id: int, session: SessionDep):
 def replace_item(item_id: int, item: ItemCreate, session: SessionDep):
     db_item = get_item_or_404(session, item_id)
     # Full dump: fields left out of the request go back to their defaults
-    db_item.sqlmodel_update(item.model_dump())
+    db_item.sqlmodel_update(item.model_dump(), update={"updated_at": utc_now()})
     session.add(db_item)
     session.commit()
     session.refresh(db_item)
@@ -136,7 +154,9 @@ def replace_item(item_id: int, item: ItemCreate, session: SessionDep):
 @app.patch("/items/{item_id}", response_model=ItemPublic)
 def update_item(item_id: int, item: ItemUpdate, session: SessionDep):
     db_item = get_item_or_404(session, item_id)
-    db_item.sqlmodel_update(item.model_dump(exclude_unset=True))
+    db_item.sqlmodel_update(
+        item.model_dump(exclude_unset=True), update={"updated_at": utc_now()}
+    )
     session.add(db_item)
     session.commit()
     session.refresh(db_item)
