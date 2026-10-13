@@ -106,6 +106,7 @@ class OfferStatus(str, Enum):
     complete = "complete"  # every requested line is in the offer
     partial = "partial"  # some lines are missing
     unavailable = "unavailable"  # nothing could be offered
+    needs_clarification = "needs_clarification"  # the customer has to answer questions first
 
 
 class Offer(SQLModel, table=True):
@@ -116,6 +117,8 @@ class Offer(SQLModel, table=True):
     reply_draft: str
     # Suspicious fragments of the e-mail (discount requests, instructions for the AI)
     flags: list[str] = Field(default_factory=list, sa_type=JSON)
+    # Questions for the customer about unclear lines; those lines are not guessed
+    clarifying_questions: list[str] = Field(default_factory=list, sa_type=JSON)
     created_at: datetime = Field(default_factory=utc_now)
 
 
@@ -163,6 +166,7 @@ class OfferPublic(SQLModel):
     lines: list[OfferLinePublic]
     missing: list[OfferMissingPublic]
     flags: list[str]
+    clarifying_questions: list[str]
     reply_draft: str
     created_at: datetime
 
