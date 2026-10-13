@@ -1,1 +1,2 @@
 fastapi[standard]==0.142.2
+sqlmodel==0.0.48
