@@ -124,7 +124,7 @@ def test_anthropic_offer_happy_path(catalog):
     response = post_email()
     assert response.status_code == 201
     offer = response.json()
-    assert offer["status"] == "complete"
+    assert offer["availability"] == "complete"
     assert [line["item_id"] for line in offer["lines"]] == [laptop, monitor]
     assert offer["total"] == "53976.00"
 
@@ -186,7 +186,7 @@ def test_anthropic_quantity_above_stock_goes_to_missing(catalog):
     )
 
     offer = post_email().json()
-    assert offer["status"] == "unavailable"
+    assert offer["availability"] == "unavailable"
     assert offer["missing"][0]["reason"] == "Stacja dokująca Dell WD19S USB-C 130W: na stanie 3 szt., zapytanie o 12 szt."
 
 
@@ -203,7 +203,7 @@ def test_anthropic_tool_errors_go_back_with_is_error(catalog):
         )
     )
 
-    assert post_email().json()["status"] == "complete"
+    assert post_email().json()["availability"] == "complete"
     not_found = fake.messages.create_calls[1]["messages"][-1]["content"][0]
     assert not_found["is_error"] is True
     assert json.loads(not_found["content"]) == {"error": "Nie ma produktu o id 999"}
@@ -224,7 +224,7 @@ def test_anthropic_text_answer_gets_one_reminder(catalog):
         )
     )
 
-    assert post_email().json()["status"] == "complete"
+    assert post_email().json()["availability"] == "complete"
     reminder = fake.messages.create_calls[1]["messages"][-1]
     assert reminder == {"role": "user", "content": "Zakończ, wywołując submit_selection z wyborem dla każdej pozycji."}
 

@@ -1,10 +1,10 @@
 # FastAPI sandbox: agent ofertowy B2B
 
-API w FastAPI i SQLModel z katalogiem produktów dystrybutora IT (`/items`) i agentem AI, który zamienia maila z zapytaniem w ofertę (`/offers`). Dane trzyma baza SQLite w pliku `database.db`, a agent korzysta z Google Gemini API.
+API w FastAPI i SQLModel z katalogiem produktów dystrybutora IT (`/items`) i agentem AI, który zamienia maila z zapytaniem w ofertę (`/offers`). Dane trzyma baza SQLite w pliku `database.db`, a agent korzysta z Anthropic API (Claude) albo Google Gemini API, do wyboru w `.env`.
 
 ## Problem biznesowy i jak go rozwiązuje
 
-Dystrybutor sprzętu IT dostaje codziennie maile z zapytaniami ofertowymi, a handlowiec ręcznie szuka produktów w katalogu, sprawdza stany i przepisuje ceny do odpowiedzi. Agent czyta maila, wypisuje z niego pozycje, ilości i budżety, a potem sam przeszukuje katalog i dobiera produkty albo zamienniki. Każdy wybór modelu przechodzi walidację w zwykłym kodzie: produkt musi istnieć, cena zawsze pochodzi z bazy, a ilość nie może przekroczyć stanu magazynowego, więc oferta nie zawiera zmyślonych produktów ani cen. Handlowiec dostaje gotową ofertę z sumą netto, listą braków i szkicem maila do klienta, który tylko sprawdza i wysyła.
+Dystrybutor sprzętu IT dostaje codziennie maile z zapytaniami ofertowymi, a handlowiec ręcznie szuka produktów w katalogu, sprawdza stany i przepisuje ceny do odpowiedzi. Agent czyta maila, wypisuje z niego pozycje, ilości i budżety, a potem sam przeszukuje katalog i dobiera produkty albo zamienniki. Każdy wybór modelu przechodzi walidację w zwykłym kodzie: produkt musi istnieć, cena zawsze pochodzi z bazy, a ilość nie może przekroczyć stanu magazynowego, więc oferta nie zawiera zmyślonych produktów ani cen. Gdy w mailu brakuje ilości albo pozycja jest zbyt ogólna, agent nie zgaduje, tylko zadaje klientowi pytania. Podejrzane fragmenty maila (prośby o rabat, polecenia dla AI) oznacza flagą do sprawdzenia. Handlowiec dostaje szkic oferty z sumą netto, listą braków i szkicem maila. Mail jest gotowy do wysyłki dopiero wtedy, gdy handlowiec zatwierdzi ofertę.
 
 ## Uruchomienie na Windows
 
@@ -33,16 +33,24 @@ python -m pip install -r requirements-dev.txt
 
 `requirements.txt` zawiera to, czego potrzebuje sama aplikacja. `requirements-dev.txt` dokłada do tego pytest i httpx2 do testów.
 
-### 3. Klucz Gemini API
+### 3. Klucz API modelu
 
-Skopiuj `.env.example` do pliku `.env` i wpisz klucz z https://aistudio.google.com/apikey:
+Skopiuj `.env.example` do pliku `.env`, wybierz dostawcę i wpisz klucz:
 
 ```powershell
 Copy-Item .env.example .env
 notepad .env
 ```
 
-Plik `.env` jest w `.gitignore`, więc klucz nie trafi do repozytorium. Domyślny model to `gemini-3.8-flash`, a inny ustawisz zmienną `GEMINI_MODEL`. Bez klucza katalog działa normalnie, a tylko `/offers/from-email` odpowiada kodem 503.
+| Zmienna | Znaczenie |
+|---|---|
+| `LLM_PROVIDER` | `anthropic` albo `gemini` (domyślnie `gemini`) |
+| `ANTHROPIC_API_KEY` | klucz z https://platform.claude.com, może też być zmienną systemową |
+| `ANTHROPIC_MODEL` | domyślnie `claude-haiku-5-5` |
+| `GEMINI_API_KEY` | klucz z https://aistudio.google.com/apikey |
+| `GEMINI_MODEL` | domyślnie `gemini-3.8-flash` |
+
+Plik `.env` jest w `.gitignore`, więc klucz nie trafi do repozytorium. Aplikacja nigdzie nie wypisuje klucza, także w komunikatach błędów. Bez klucza katalog działa normalnie, a tylko `/offers/from-email` odpowiada kodem 503. Serwer czyta `.env` przy starcie, więc po zmianie tego pliku uruchom go ponownie.
 
 ### 4. Serwer
 
@@ -62,7 +70,7 @@ Otwórz http://127.0.0.1:8000/docs. Każdy endpoint możesz tam wypróbować prz
 python -m pytest
 ```
 
-Testy używają osobnej bazy w pamięci, więc nie zmieniają pliku `database.db`. Gemini jest w nich zastąpione fałszywym klientem, więc testy nie potrzebują klucza ani internetu.
+Testy używają osobnej bazy w pamięci, więc nie zmieniają pliku `database.db`. Gemini i Anthropic są w nich zastąpione fałszywymi klientami, więc testy nie potrzebują klucza ani internetu.
 
 ## Baza danych
 
@@ -281,11 +289,18 @@ Usuwa produkt, np. `DELETE /items/1`. Odpowiedź `204` nie ma treści.
 
 ## Agent ofertowy
 
-Agent działa w trzech krokach:
+Agent działa w czterech krokach:
 
-1. **Ekstrakcja** (`ai.py`): Gemini ze structured output zamienia maila na listę pozycji z opisem, ilością i opcjonalnym budżetem, plus termin i uwagi.
-2. **Dobór** (`ai.py`): Gemini wywołuje narzędzia `search_items` i `get_item`, które korzystają z tej samej logiki co `GET /items`. Na koniec przekazuje wybór przez `submit_selection`.
+1. **Ekstrakcja** (`ai.py`): model ze structured output zamienia maila na listę pozycji z opisem, ilością i opcjonalnym budżetem, plus termin, uwagi, pytania do klienta i flagi. Pozycja bez ilości albo zbyt ogólna („jakiś monitor”) nie jest zgadywana.
+2. **Dobór** (`ai.py`): model wywołuje narzędzia `search_items` i `get_item`, które korzystają z tej samej logiki co `GET /items`. Na koniec przekazuje wybór przez `submit_selection`. Do doboru trafiają tylko jasne pozycje.
 3. **Walidacja** (`offers.py`): zwykły kod, bez AI. Produkt musi istnieć, cena zawsze pochodzi z bazy, ilość nie może przekroczyć stanu magazynowego. Pozycje, które nie przejdą, trafiają do `missing` z powodem. Szkic maila powstaje z szablonu, tylko z danych po walidacji.
+4. **Decyzja człowieka**: oferta zapisuje się jako szkic. Handlowiec ją zatwierdza (`/approve`) albo odrzuca z powodem (`/reject`). Dopiero zatwierdzona oferta ma wypełnione `email_to_send`.
+
+Oba modele (Claude i Gemini) przechodzą tę samą ścieżkę: te same instrukcje, te same narzędzia i ta sama walidacja. Dostawcę wybiera `LLM_PROVIDER`.
+
+### Ochrona przed prompt injection
+
+Mail klienta to dane, nie polecenia. Model dostaje go w bloku `<email_klienta>`, z którego wycinane są podrobione znaczniki. Nawet gdy model da się przekonać do „rabatu 90%”, nic się nie zmienia: ceny i tak pochodzą z bazy, a szkic maila powstaje z szablonu. Fragmenty maila, które wyglądają na prośbę o rabat, darmowy towar albo polecenie dla AI, trafiają do `flags` (wykrywa je model i niezależnie od niego wyrażenia regularne w `guard.py`). Takie fragmenty nie trafiają też do treści odpowiedzi.
 
 ### POST /offers/from-email
 
@@ -302,7 +317,8 @@ Odpowiedź `201`, przykład dla pierwszego maila z sekcji niżej. W bazie z `see
 ```json
 {
   "id": 1,
-  "status": "partial",
+  "status": "draft",
+  "availability": "partial",
   "total": "25240.00",
   "lines": [
     {
@@ -333,21 +349,49 @@ Odpowiedź `201`, przykład dla pierwszego maila z sekcji niżej. W bazie z `see
       "reason": "Monitor LG 27UP850N 27 4K IPS: na stanie 0 szt., zapytanie o 3 szt."
     }
   ],
+  "flags": [],
+  "clarifying_questions": [],
   "reply_draft": "Dzień dobry,\n\ndziękujemy za zapytanie.\nPrzesyłamy ofertę (ceny netto):\n\n1. Laptop Dell Latitude 5450 14 i5 16GB 512GB: 5 szt. x 4 299,00 zł = 21 495,00 zł\n2. Stacja dokująca Dell WD19S USB-C 130W: 5 szt. x 749,00 zł = 3 745,00 zł\n\nRazem netto: 25 240,00 zł.\n\nObecnie nie możemy zaoferować:\n- monitor 27 cali 4K (3 szt.)\nChętnie zaproponujemy inne rozwiązanie.\n\nTermin dostawy (30 października) potwierdzimy po złożeniu zamówienia.\n\nOferta jest ważna 14 dni.\n\nPozdrawiamy,\nDział sprzedaży",
-  "created_at": "2026-10-13T16:59:56.583295Z"
+  "email_to_send": null,
+  "rejection_reason": null,
+  "created_at": "2026-10-13T16:59:56.583295Z",
+  "decided_at": null
 }
 ```
 
-`status` to `complete` (wszystko w ofercie), `partial` (część pozycji brakuje) albo `unavailable` (nic nie da się zaoferować). Przy zamienniku `is_substitute` ma wartość `true`, a `note` opisuje różnicę. Produkt droższy niż budżet klienta zostaje w ofercie z notatką „Powyżej budżetu klienta”.
+Pola:
+- `status`: `draft` (czeka na handlowca), `needs_clarification` (szkic zawiera pytania do klienta), `approved` albo `rejected`. Agent tworzy tylko pierwsze dwa.
+- `availability`: `complete` (wszystko w ofercie), `partial` (część pozycji brakuje) albo `unavailable` (nic nie da się zaoferować).
+- `flags`: podejrzane fragmenty maila do sprawdzenia przez człowieka.
+- `clarifying_questions`: pytania do klienta. Pozycje, których dotyczą, nie są wyceniane.
+- `email_to_send`: treść do wysłania, tylko po zatwierdzeniu. Wcześniej `null`.
+
+Przy zamienniku `is_substitute` ma wartość `true`, a `note` opisuje różnicę. Produkt droższy niż budżet klienta zostaje w ofercie z notatką „Powyżej budżetu klienta”.
 
 Błędy:
 - `422`: pusty `email_text` albo dłuższy niż 20 000 znaków.
-- `502`: Gemini zwróciło błąd albo odpowiedź, której nie da się użyć. Treść błędu jest w `detail`.
-- `503`: brak `GEMINI_API_KEY` w `.env`.
+- `502`: API modelu zwróciło błąd (np. brak środków na koncie) albo odpowiedź, której nie da się użyć. Treść błędu jest w `detail`.
+- `503`: brak klucza wybranego dostawcy albo nieznany `LLM_PROVIDER`.
 
 ### GET /offers/{offer_id}
 
 Zwraca zapisaną ofertę w tym samym kształcie co `POST /offers/from-email`. Gdy oferty nie ma, odpowiada `404` z `{"detail": "Offer not found"}`.
+
+### POST /offers/{offer_id}/approve
+
+Bez treści żądania. Zmienia status na `approved`, ustawia `decided_at` i wypełnia `email_to_send` treścią `reply_draft`. Zatwierdzić można ofertę w statusie `draft` albo `needs_clarification` (wtedy klient dostaje pytania).
+
+### POST /offers/{offer_id}/reject
+
+```json
+{
+  "reason": "Klient ma umowę ramową z innym cennikiem."
+}
+```
+
+Zmienia status na `rejected` i zapisuje powód w `rejection_reason`. `email_to_send` zostaje `null`. Powód jest obowiązkowy (3 do 500 znaków), bez niego odpowiedź to `422`.
+
+Decyzja jest ostateczna: druga próba zatwierdzenia albo odrzucenia daje `409` z `{"detail": "Oferta ma już status approved."}`. Nieistniejąca oferta daje `404`.
 
 ### Przykładowe maile do testów w /docs
 

@@ -66,9 +66,9 @@ class ItemCreate(ItemBase):
     pass
 
 
-def assume_utc(value: datetime) -> datetime:
+def assume_utc(value: datetime | None) -> datetime | None:
     # SQLite drops the time zone when it stores a datetime; all stored times are UTC
-    if value.tzinfo is None:
+    if value is not None and value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value
 
@@ -103,16 +103,25 @@ class ItemUpdate(SQLModel):
 
 
 class OfferStatus(str, Enum):
+    """Where the offer is in its life. Only a person moves it to approved or rejected."""
+
+    draft = "draft"  # waiting for a salesperson
+    needs_clarification = "needs_clarification"  # the reply asks the customer questions
+    approved = "approved"  # the reply may be sent
+    rejected = "rejected"
+
+
+class Availability(str, Enum):
     complete = "complete"  # every requested line is in the offer
     partial = "partial"  # some lines are missing
     unavailable = "unavailable"  # nothing could be offered
-    needs_clarification = "needs_clarification"  # the customer has to answer questions first
 
 
 class Offer(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     customer_email_text: str
     status: OfferStatus
+    availability: Availability
     total: Decimal = Field(sa_type=Money)
     reply_draft: str
     # Suspicious fragments of the e-mail (discount requests, instructions for the AI)
@@ -120,6 +129,9 @@ class Offer(SQLModel, table=True):
     # Questions for the customer about unclear lines; those lines are not guessed
     clarifying_questions: list[str] = Field(default_factory=list, sa_type=JSON)
     created_at: datetime = Field(default_factory=utc_now)
+    # Set when a person approves or rejects the offer
+    decided_at: datetime | None = None
+    rejection_reason: str | None = None
 
 
 class OfferLine(SQLModel, table=True):
@@ -142,6 +154,18 @@ class OfferRequest(SQLModel):
     email_text: str = Field(min_length=1, max_length=20000)
 
 
+class OfferRejection(SQLModel):
+    reason: str = Field(min_length=3, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def strip_reason(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) < 3:
+            raise ValueError("reason must have at least 3 characters")
+        return value
+
+
 class OfferLinePublic(SQLModel):
     item_id: int
     item_name: str
@@ -162,12 +186,17 @@ class OfferMissingPublic(SQLModel):
 class OfferPublic(SQLModel):
     id: int
     status: OfferStatus
+    availability: Availability
     total: Decimal
     lines: list[OfferLinePublic]
     missing: list[OfferMissingPublic]
     flags: list[str]
     clarifying_questions: list[str]
     reply_draft: str
+    # Filled only after approval: nothing the agent wrote leaves without a person's OK
+    email_to_send: str | None
+    rejection_reason: str | None
     created_at: datetime
+    decided_at: datetime | None
 
-    _utc = field_validator("created_at")(assume_utc)
+    _utc = field_validator("created_at", "decided_at")(assume_utc)

@@ -18,6 +18,7 @@ from models import (
     ItemUpdate,
     Offer,
     OfferPublic,
+    OfferRejection,
     OfferRequest,
     utc_now,
 )
@@ -140,9 +141,32 @@ def create_offer_from_email(request: OfferRequest, session: SessionDep, llm: AIC
     return offers.offer_public(session, offer)
 
 
-@app.get("/offers/{offer_id}", response_model=OfferPublic)
-def get_offer(offer_id: int, session: SessionDep):
+def get_offer_or_404(session, offer_id: int) -> Offer:
     offer = session.get(Offer, offer_id)
     if offer is None:
         raise HTTPException(status_code=404, detail="Offer not found")
+    return offer
+
+
+@app.get("/offers/{offer_id}", response_model=OfferPublic)
+def get_offer(offer_id: int, session: SessionDep):
+    return offers.offer_public(session, get_offer_or_404(session, offer_id))
+
+
+def decide_offer(session, offer_id: int, approve: bool, reason: str | None = None):
+    offer = get_offer_or_404(session, offer_id)
+    try:
+        offer = offers.decide(session, offer, approve, reason)
+    except offers.OfferAlreadyDecided as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     return offers.offer_public(session, offer)
+
+
+@app.post("/offers/{offer_id}/approve", response_model=OfferPublic)
+def approve_offer(offer_id: int, session: SessionDep):
+    return decide_offer(session, offer_id, approve=True)
+
+
+@app.post("/offers/{offer_id}/reject", response_model=OfferPublic)
+def reject_offer(offer_id: int, rejection: OfferRejection, session: SessionDep):
+    return decide_offer(session, offer_id, approve=False, reason=rejection.reason)
