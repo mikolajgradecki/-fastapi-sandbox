@@ -412,3 +412,31 @@ Mail 2: wyposażenie stanowisk z akcesoriami i budżetem:
   "email_text": "Witam, otwieramy nowe biuro i potrzebujemy 12 zestawów: monitor 24 cale, klawiatura z myszką bezprzewodowa i słuchawki do Teams. Do tego 12 kabli HDMI 2 m. Budżet na monitor to maksymalnie 600 zł netto za sztukę. Czy dacie radę dostarczyć w ciągu 2 tygodni? Tomasz Wiśniewski, IT Manager"
 }
 ```
+
+## Evale
+
+Testy w `tests/` sprawdzają kod z fałszywym modelem. Evale sprawdzają prawdziwy model: wysyłają 8 maili z `evals/cases.json` przez API i porównują ofertę z oczekiwanym wynikiem.
+
+```powershell
+python run_evals.py
+python run_evals.py brak
+```
+
+Drugi wariant uruchamia tylko przypadki, których nazwa zawiera podany tekst. Skrypt używa dostawcy i klucza z `.env`, więc każde uruchomienie kosztuje kilka wywołań API. Katalog to świeża baza w pamięci z `seed.py`, więc `database.db` zostaje nietknięty. Przy limicie zapytań (429) albo przeciążeniu serwera skrypt ponawia próbę do 3 razy.
+
+Przypadki: zwykłe zapytanie, literówki, za mały budżet, brak towaru na stanie, niejasne zapytanie, prompt injection, mail po angielsku i 8 pozycji naraz. W każdym skrypt sprawdza też reguły wspólne: cena równa cenie z katalogu, ilość nie większa niż stan, brak `email_to_send` przed zatwierdzeniem i poprawne `email_to_send` po zatwierdzeniu.
+
+Wynik wygląda tak:
+
+```
+Evale: 8 przypadków, dostawca anthropic, model claude-haiku-5-5
+
+[OK]   1. zwykle zapytanie (5.2 s)
+...
+[BŁĄD] 4. brak na stanie (12.4 s)
+       - zaoferowano produkt bez stanu: LG 27UP850N
+
+Wynik: 7/8
+```
+
+Kod wyjścia to 0, gdy przechodzą wszystkie przypadki, i 1 w przeciwnym razie.
