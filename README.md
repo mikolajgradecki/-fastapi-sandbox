@@ -58,7 +58,15 @@ $env:DATABASE_URL = "sqlite:///inna-baza.db"
 python -m uvicorn main:app --reload
 ```
 
-Tabele powstają przy starcie serwera. Projekt nie ma migracji, więc po zmianie pól w modelu `Item` usuń `database.db`. Serwer założy go od nowa, ale dane z pliku przepadną.
+Tabele powstają przy starcie serwera. Projekt nie ma migracji, więc po zmianie pól w modelu `Item` usuń `database.db`. Serwer założy go od nowa, ale dane z pliku przepadną. Przed usunięciem zatrzymaj serwer, bo Windows nie pozwoli usunąć otwartego pliku.
+
+### Przykładowe dane
+
+```powershell
+python seed.py
+```
+
+Skrypt dodaje 30 produktów (elektronika, książki, sport) do tej samej bazy, której używa serwer. Produktów, które już są w bazie, nie dodaje drugi raz, więc możesz go uruchamiać wielokrotnie.
 
 ## Endpointy
 
