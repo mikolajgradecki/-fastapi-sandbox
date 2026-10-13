@@ -6,10 +6,11 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlmodel import Session, SQLModel, create_engine
+from sqlmodel import Session, SQLModel, create_engine, select
 from sqlmodel.pool import StaticPool
 
 import main
+import seed
 
 client = TestClient(main.app)
 
@@ -262,6 +263,11 @@ def test_database_url_default():
     assert engine_url_for(env) == "sqlite:///database.db"
 
 
+def test_database_url_empty_uses_default():
+    env = {**os.environ, "DATABASE_URL": ""}
+    assert engine_url_for(env) == "sqlite:///database.db"
+
+
 def test_database_url_from_env():
     env = {**os.environ, "DATABASE_URL": "sqlite:///other.db"}
     assert engine_url_for(env) == "sqlite:///other.db"
@@ -406,3 +412,39 @@ def test_client_cannot_set_timestamps():
     )
     assert response.status_code == 201
     assert not response.json()["created_at"].startswith("2000")
+
+
+@pytest.fixture
+def seed_session():
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as session:
+        yield session
+    engine.dispose()
+
+
+def test_seed_adds_30_varied_products(seed_session):
+    assert seed.seed(seed_session) == 30
+
+    items = seed_session.exec(select(main.Item)).all()
+    assert len(items) == 30
+    assert len({item.name for item in items}) == 30
+    assert min(item.price for item in items) == 5
+    assert max(item.price for item in items) <= 8000
+    with_description = [item for item in items if item.description]
+    assert 0 < len(with_description) < 30
+    assert all(item.created_at is not None for item in items)
+
+
+def test_seed_twice_adds_nothing(seed_session):
+    seed.seed(seed_session)
+
+    assert seed.seed(seed_session) == 0
+    assert len(seed_session.exec(select(main.Item)).all()) == 30
+
+
+def test_seeded_products_are_valid_for_the_api():
+    for product in seed.PRODUCTS:
+        main.ItemCreate.model_validate(product)
