@@ -2,14 +2,25 @@ from contextlib import asynccontextmanager
 from decimal import Decimal
 from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import SQLModel
 
+import ai
+import offers
 from catalog import get_item_or_404, search_items
 from database import SessionDep, engine
-from models import Item, ItemCreate, ItemPublic, ItemUpdate, utc_now
+from models import (
+    Item,
+    ItemCreate,
+    ItemPublic,
+    ItemUpdate,
+    Offer,
+    OfferPublic,
+    OfferRequest,
+    utc_now,
+)
 
 
 @asynccontextmanager
@@ -104,3 +115,32 @@ def delete_item(item_id: int, session: SessionDep):
     db_item = get_item_or_404(session, item_id)
     session.delete(db_item)
     session.commit()
+
+
+def ai_client():
+    try:
+        return ai.get_client()
+    except ai.AIConfigError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+
+AIClientDep = Annotated[object, Depends(ai_client)]
+
+
+@app.post("/offers/from-email", status_code=201, response_model=OfferPublic)
+def create_offer_from_email(request: OfferRequest, session: SessionDep, client: AIClientDep):
+    try:
+        spec = ai.extract_request(client, request.email_text)
+        selection = ai.select_products(client, session, spec)
+    except ai.AIError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+    offer = offers.create_offer(session, request.email_text, spec, selection)
+    return offers.offer_public(session, offer)
+
+
+@app.get("/offers/{offer_id}", response_model=OfferPublic)
+def get_offer(offer_id: int, session: SessionDep):
+    offer = session.get(Offer, offer_id)
+    if offer is None:
+        raise HTTPException(status_code=404, detail="Offer not found")
+    return offers.offer_public(session, offer)

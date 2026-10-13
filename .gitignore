@@ -11,3 +11,6 @@ venv/
 
 # SQLite database
 database.db
+
+# Secrets (API keys)
+.env

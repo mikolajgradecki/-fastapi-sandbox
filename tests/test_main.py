@@ -7,44 +7,13 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
-from sqlmodel import Session, SQLModel, create_engine, select
-from sqlmodel.pool import StaticPool
+from sqlmodel import Session, create_engine, select
 
 import database
 import main
 import seed
 
 client = TestClient(main.app)
-
-
-@pytest.fixture(autouse=True)
-def test_db():
-    # Each test gets a fresh in-memory database, so tests don't affect each other.
-    # StaticPool keeps one connection, otherwise every connection would see its own empty database.
-    engine = create_engine(
-        "sqlite://",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
-    SQLModel.metadata.create_all(engine)
-    _engines.append(engine)
-
-    def get_test_session():
-        with Session(engine) as session:
-            yield session
-
-    main.app.dependency_overrides[database.get_session] = get_test_session
-    yield
-    main.app.dependency_overrides.clear()
-    _engines.clear()
-    engine.dispose()
-
-
-_engines = []
-
-
-def current_engine():
-    return _engines[-1]
 
 
 def without_timestamps(item):
@@ -445,14 +414,9 @@ def test_client_cannot_set_timestamps():
 
 
 @pytest.fixture
-def seed_session():
-    engine = create_engine(
-        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
-    )
-    SQLModel.metadata.create_all(engine)
-    with Session(engine) as session:
+def seed_session(db_engine):
+    with Session(db_engine) as session:
         yield session
-    engine.dispose()
 
 
 def test_seed_adds_it_catalog(seed_session):
@@ -489,12 +453,12 @@ def test_seeded_products_are_valid_for_the_api():
         main.ItemCreate.model_validate(product)
 
 
-def test_price_is_exact_and_stored_in_grosze():
+def test_price_is_exact_and_stored_in_grosze(db_engine):
     item = client.post("/items", json={"name": "Kabel", "price": "0.10"}).json()
     client.patch(f"/items/{item['id']}", json={"price": "0.30"})
 
     assert client.get(f"/items/{item['id']}").json()["price"] == "0.30"
-    with Session(current_engine()) as session:
+    with Session(db_engine) as session:
         stored = session.exec(text("SELECT price FROM item")).one()[0]
     assert stored == 30
 
