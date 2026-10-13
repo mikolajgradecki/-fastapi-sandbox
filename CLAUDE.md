@@ -1,33 +1,35 @@
-# FastAPI sandbox
+# FastAPI sandbox: agent ofertowy B2B
 
-Projekt do nauki: CRUD przedmiotów (`/items`) w FastAPI + SQLModel na SQLite. Python 3.14, Windows.
+Projekt do nauki: katalog produktów dystrybutora IT (`/items`) i agent Gemini, który zamienia maila z zapytaniem w ofertę (`/offers`). FastAPI + SQLModel na SQLite, Python 3.14, Windows.
 
 ## Struktura
 
-- `main.py`: cała aplikacja (modele, engine, `get_session`, endpointy).
-- `seed.py`: 30 przykładowych produktów, `python seed.py`. Pomija nazwy, które już są w bazie.
-- `tests/test_main.py`: wszystkie testy. Fixture `test_db` (autouse) podmienia `get_session` na bazę w pamięci przez `app.dependency_overrides`.
-- `README.md`: instrukcja po polsku dla ludzi i przykłady JSON. Przy zmianie API zaktualizuj przykłady.
-- `.github/workflows/tests.yml`: CI, `pytest` na Python 3.14.
+- `main.py`: same endpointy i zależność `ai_client` (testy ją podmieniają).
+- `database.py`: `DATABASE_URL`, `engine`, `get_session`, `SessionDep`.
+- `models.py`: tabele `Item`, `Offer`, `OfferLine`, schematy API, typ `Money` (Decimal zapisywany w groszach jako Integer).
+- `catalog.py`: `search_items`, `list_categories`, `get_item_or_404`. Wspólne dla `GET /items` i narzędzi agenta.
+- `ai.py`: Gemini (`google-genai`). Krok 1 `extract_request` (structured output, `RequestSpec`), krok 2 `select_products` (własna pętla tool calling, kończy się `submit_selection`).
+- `offers.py`: krok 3, walidacja bez AI (`validate_selection`), zapis, szkic maila z szablonu (`render_reply`).
+- `seed.py`: 40 produktów IT w 7 kategoriach, `python seed.py`. Pomija nazwy, które już są w bazie.
+- `tests/conftest.py`: fixture `test_db` (autouse) podmienia `get_session` na bazę w pamięci, `db_engine` daje do niej dostęp.
+- `tests/test_main.py`: katalog i seed. `tests/test_offers.py`: agent z `FakeGemini`, który odtwarza przygotowane odpowiedzi z prawdziwych typów SDK.
+- `README.md`: instrukcja po polsku i przykłady JSON. Przy zmianie API zaktualizuj przykłady.
 
 ## Komendy
 
-- Testy: `python -m pytest` (`pytest.exe` nie jest w PATH).
+- Testy: `python -m pytest` (`pytest.exe` nie jest w PATH). Nie wymagają klucza ani sieci.
 - Serwer: `python -m uvicorn main:app --reload`, dokumentacja na http://127.0.0.1:8000/docs.
 - Zależności: `requirements.txt` (aplikacja), `requirements-dev.txt` (+ pytest, httpx2). Wersje przypięte przez `==`.
-
-## Modele
-
-- `ItemBase`: `name` (1-100 znaków), `price` (> 0), `description` (opcjonalne).
-- `Item` (tabela): + `id`, `created_at`, `updated_at` (UTC, ustawia serwer).
-- `ItemCreate` (POST, PUT), `ItemUpdate` (PATCH, wszystko opcjonalne, `null` dla `name` i `price` daje 422), `ItemPublic` (`response_model` każdego endpointu `/items`).
+- Klucz: `GEMINI_API_KEY` w `.env` (wzór `.env.example`, `.env` jest w `.gitignore`). Model: `GEMINI_MODEL`, domyślnie `gemini-3.8-flash`.
 
 ## Konwencje
 
-- Endpointy używające sesji to `def`, nie `async def` (sesja SQLModel jest synchroniczna).
-- 404 tylko przez `get_item_or_404`. PUT podmienia wszystkie pola (`model_dump()`), PATCH tylko przesłane (`exclude_unset=True`). Oba odświeżają `updated_at`.
-- Baza: `DATABASE_URL`, domyślnie `sqlite:///database.db`. Tabele tworzy `create_all` w `lifespan`. Nie ma migracji: po zmianie schematu stary `database.db` trzeba odtworzyć (nie kasuj go bez zgody właściciela, może mieć dane).
-- `database.db` jest w `.gitignore`. Testy go nie dotykają (`TestClient` bez `with` nie uruchamia `lifespan`).
-- `pytest.ini` zamienia ostrzeżenia o przestarzałych funkcjach w błędy. Nie wyciszaj ich, napraw przyczynę.
-- Komentarze w kodzie po angielsku, krótkie, tylko gdy wyjaśniają „dlaczego”. Dokumentacja i commity po polsku.
-- Każda zmiana zachowania ma test. Nowe testy dopisuj w `tests/test_main.py`.
+- Kwoty to `Decimal` (`price`, `total`, `unit_price`), w JSON jako tekst `"899.00"`. Nigdy `float` w obliczeniach.
+- Model AI niczego nie ustala sam: id produktu, cenę i stan zawsze sprawdza `offers.validate_selection` w bazie. Szkic maila powstaje tylko z danych po walidacji.
+- Endpointy używające sesji to `def`, nie `async def` (sesja SQLModel i klient Gemini są synchroniczne).
+- Błędy agenta: `ai.AIConfigError` daje 503, `ai.AIError` daje 502.
+- 404 dla produktów tylko przez `get_item_or_404`. PUT podmienia wszystkie pola, PATCH tylko przesłane. Oba odświeżają `updated_at`.
+- Tabele tworzy `create_all` w `lifespan`. Nie ma migracji: po zmianie schematu stary `database.db` trzeba odtworzyć (nie kasuj go bez zgody właściciela, może mieć dane).
+- `pytest.ini` zamienia ostrzeżenia o przestarzałych funkcjach w błędy. Wyjątek ma tylko jedno ostrzeżenie z wnętrza `google-genai`. Nie wyciszaj innych, napraw przyczynę.
+- Komentarze w kodzie po angielsku, krótkie, tylko gdy wyjaśniają „dlaczego”. Komunikaty dla użytkownika, dokumentacja i commity po polsku.
+- Każda zmiana zachowania ma test.
