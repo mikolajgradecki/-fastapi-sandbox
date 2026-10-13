@@ -1,3 +1,8 @@
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, SQLModel, create_engine
@@ -211,3 +216,26 @@ def test_update_item_with_negative_price():
     response = client.patch(f"/items/{item['id']}", json={"price": -1})
     assert response.status_code == 422
     assert client.get(f"/items/{item['id']}").json() == item
+
+
+def engine_url_for(env):
+    # main reads DATABASE_URL at import time, so check it in a fresh Python process
+    result = subprocess.run(
+        [sys.executable, "-c", "import main; print(main.engine.url)"],
+        cwd=Path(__file__).parent.parent,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def test_database_url_default():
+    env = {k: v for k, v in os.environ.items() if k != "DATABASE_URL"}
+    assert engine_url_for(env) == "sqlite:///database.db"
+
+
+def test_database_url_from_env():
+    env = {**os.environ, "DATABASE_URL": "sqlite:///other.db"}
+    assert engine_url_for(env) == "sqlite:///other.db"
