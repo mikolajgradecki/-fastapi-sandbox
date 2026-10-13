@@ -288,3 +288,49 @@ def test_list_items_max_limit():
 def test_list_items_invalid_pagination(params):
     response = client.get("/items", params=params)
     assert response.status_code == 422
+
+
+@pytest.fixture
+def shop_items():
+    for name, price in [
+        ("Gaming Laptop", 5999.0),
+        ("Office laptop", 2499.0),
+        ("Mouse", 49.9),
+        ("100% cotton pad", 19.9),
+    ]:
+        client.post("/items", json={"name": name, "price": price})
+
+
+@pytest.mark.usefixtures("shop_items")
+@pytest.mark.parametrize(
+    "params, expected",
+    [
+        ({"name": "laptop"}, ["Gaming Laptop", "Office laptop"]),
+        ({"name": "LAPTOP"}, ["Gaming Laptop", "Office laptop"]),
+        ({"name": "use"}, ["Mouse"]),
+        ({"name": "%"}, ["100% cotton pad"]),
+        ({"name": "_"}, []),
+        ({"name": "tablet"}, []),
+        ({"min_price": 2499}, ["Gaming Laptop", "Office laptop"]),
+        ({"max_price": 49.9}, ["Mouse", "100% cotton pad"]),
+        ({"min_price": 20, "max_price": 3000}, ["Office laptop", "Mouse"]),
+        ({"name": "laptop", "max_price": 3000}, ["Office laptop"]),
+        ({"name": "laptop", "limit": 1, "offset": 1}, ["Office laptop"]),
+    ],
+)
+def test_search_items(params, expected):
+    response = client.get("/items", params=params)
+    assert response.status_code == 200
+    assert names(response) == expected
+
+
+def test_search_min_price_greater_than_max_price():
+    response = client.get("/items", params={"min_price": 100, "max_price": 10})
+    assert response.status_code == 422
+    assert response.json() == {"detail": "min_price cannot be greater than max_price"}
+
+
+@pytest.mark.parametrize("params", [{"min_price": -1}, {"max_price": "abc"}])
+def test_search_invalid_price_filter(params):
+    response = client.get("/items", params=params)
+    assert response.status_code == 422
