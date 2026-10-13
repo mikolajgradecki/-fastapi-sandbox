@@ -239,3 +239,52 @@ def test_database_url_default():
 def test_database_url_from_env():
     env = {**os.environ, "DATABASE_URL": "sqlite:///other.db"}
     assert engine_url_for(env) == "sqlite:///other.db"
+
+
+def create_numbered_items(count):
+    for number in range(1, count + 1):
+        client.post("/items", json={"name": f"Item {number}", "price": number})
+
+
+def names(response):
+    return [item["name"] for item in response.json()]
+
+
+def test_list_items_default_limit():
+    create_numbered_items(25)
+
+    response = client.get("/items")
+    assert response.status_code == 200
+    assert names(response) == [f"Item {number}" for number in range(1, 21)]
+
+
+def test_list_items_offset_and_limit():
+    create_numbered_items(10)
+
+    response = client.get("/items", params={"offset": 3, "limit": 4})
+    assert response.status_code == 200
+    assert names(response) == ["Item 4", "Item 5", "Item 6", "Item 7"]
+
+
+def test_list_items_offset_past_end():
+    create_numbered_items(3)
+
+    response = client.get("/items", params={"offset": 10})
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_list_items_max_limit():
+    create_numbered_items(101)
+
+    response = client.get("/items", params={"limit": 100})
+    assert response.status_code == 200
+    assert len(response.json()) == 100
+
+
+@pytest.mark.parametrize(
+    "params", [{"offset": -1}, {"limit": 0}, {"limit": 101}, {"limit": "abc"}]
+)
+def test_list_items_invalid_pagination(params):
+    response = client.get("/items", params=params)
+    assert response.status_code == 422
