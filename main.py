@@ -3,8 +3,10 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from pydantic import field_validator
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Field, Session, SQLModel, col, create_engine, select
 
 
@@ -94,8 +96,13 @@ async def root():
 
 
 @app.get("/health")
-async def health():
-    return {"status": "ok"}
+def health(session: SessionDep, response: Response):
+    try:
+        session.exec(text("SELECT 1"))
+    except SQLAlchemyError:
+        response.status_code = 503
+        return {"status": "error", "database": "unavailable"}
+    return {"status": "ok", "database": "ok"}
 
 
 @app.post("/items", status_code=201, response_model=ItemPublic)

@@ -48,7 +48,22 @@ def test_root():
 def test_health():
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json() == {"status": "ok", "database": "ok"}
+
+
+def test_health_database_unavailable(tmp_path):
+    # SQLite cannot open a file in a folder that does not exist, so every query fails
+    broken_engine = create_engine(f"sqlite:///{tmp_path / 'missing' / 'db.sqlite'}")
+
+    def get_broken_session():
+        with Session(broken_engine) as session:
+            yield session
+
+    main.app.dependency_overrides[main.get_session] = get_broken_session
+
+    response = client.get("/health")
+    assert response.status_code == 503
+    assert response.json() == {"status": "error", "database": "unavailable"}
 
 
 def test_create_item():
