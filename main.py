@@ -59,7 +59,8 @@ class ItemUpdate(SQLModel):
         return value
 
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///database.db")
+# "or" also covers DATABASE_URL set to an empty string
+DATABASE_URL = os.getenv("DATABASE_URL") or "sqlite:///database.db"
 
 # check_same_thread=False: FastAPI runs sync endpoints in a thread pool (SQLite only)
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
