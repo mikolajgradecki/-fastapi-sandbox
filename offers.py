@@ -4,8 +4,10 @@ Plain code, no AI. Whatever the model returned, every offered line has a product
 the price from the database and enough stock. Anything else becomes a missing line with a reason.
 """
 
+import re
 from decimal import Decimal
 
+from sqlalchemy import update
 from sqlmodel import Session, select
 
 from ai import RequestSpec, Selection
@@ -88,16 +90,52 @@ def format_pln(amount: Decimal) -> str:
     return f"{amount:,.2f} zł".replace(",", " ").replace(".", ",")
 
 
-def clarifying_questions(spec: RequestSpec) -> list[str]:
+def is_flagged(text: str | None, flags) -> bool:
+    """True when the text overlaps a flagged fragment (either one contains the other)."""
+    text = " ".join((text or "").split()).casefold()
+    for flag in flags:
+        flag = " ".join(flag.split()).casefold()
+        if text and flag and (flag in text or text in flag):
+            return True
+    return False
+
+
+def reply_text(value: str | None, flags, max_length: int = 120) -> str | None:
+    """Text from the e-mail that may go into the reply: safe_text, and not flagged by anyone."""
+    text = safe_text(value, max_length=max_length)
+    return None if is_flagged(text, flags) else text
+
+
+DEADLINE_PATTERN = re.compile(
+    r"\d{1,2}[./-]\d{1,2}|poniedzia|wtor|[śs]rod|czwart|pi[ąa]t|sobot|niedziel|tydzie|tygod|miesi"
+    r"|jutro|dzisiaj|dzi[śs]\b|pojutrze|jak najszybciej|\bdni\b"
+)
+PRICE_WORD_PATTERN = re.compile(r"\b(cen\w*|z[łl]|pln|eur\w*|usd|dolar\w*|koszt\w*|rabat\w*)\b")
+
+
+def delivery_deadline(value: str | None, flags) -> str | None:
+    """A short, plain deadline or nothing: free text here is a way to put words into the reply."""
+    text = reply_text(value, flags, max_length=60)
+    if text is None or len(text) > 40:
+        return None
+    if not all(char.isalnum() or char in " .,:/-" for char in text):
+        return None
+    lowered = text.casefold()
+    if PRICE_WORD_PATTERN.search(lowered) or not DEADLINE_PATTERN.search(lowered):
+        return None
+    return text
+
+
+def clarifying_questions(spec: RequestSpec, flags=()) -> list[str]:
     """Questions for the customer. Never empty when a line is unclear or nothing was asked for."""
     # The model's questions go to the customer, so they get the same check as e-mail text
-    questions = [q for q in (safe_text(q, max_length=200) for q in spec.clarifying_questions) if q]
+    questions = [q for q in (reply_text(q, flags, max_length=200) for q in spec.clarifying_questions) if q]
     unclear = [line for line in spec.lines if not line.is_clear]
     if not spec.lines:
         return questions or ["Jakie produkty i w jakich ilościach mamy uwzględnić w ofercie?"]
     if unclear and not questions:
         for line in unclear:
-            what = safe_text(line.description) or "jedna z pozycji zapytania"
+            what = reply_text(line.description, flags) or "jedna z pozycji zapytania"
             if line.quantity is None:
                 questions.append(f"Ile sztuk potrzebują Państwo: {what}?")
             else:
@@ -106,7 +144,7 @@ def clarifying_questions(spec: RequestSpec) -> list[str]:
 
 
 def render_reply(
-    lines: list[OfferLine], spec: RequestSpec, total: Decimal, questions: list[str] = ()
+    lines: list[OfferLine], spec: RequestSpec, total: Decimal, questions: list[str] = (), flags=()
 ) -> str:
     """Reply e-mail built only from validated data, so it cannot contain an invented price.
 
@@ -118,7 +156,7 @@ def render_reply(
     position = {id(line): number for number, line in enumerate(lines, start=1)}
 
     def requested(line: OfferLine) -> str:
-        return safe_text(line.requested) or f"pozycja nr {position[id(line)]} z zapytania"
+        return reply_text(line.requested, flags) or f"pozycja nr {position[id(line)]} z zapytania"
 
     parts = ["Dzień dobry,", "", "dziękujemy za zapytanie."]
     if offered:
@@ -140,7 +178,7 @@ def render_reply(
     if questions:
         parts += ["", "Aby przygotować pełną ofertę, prosimy o doprecyzowanie:"]
         parts += [f"{number}. {question}" for number, question in enumerate(questions, start=1)]
-    deadline = safe_text(spec.deadline, max_length=60)
+    deadline = delivery_deadline(spec.deadline, flags)
     if offered and deadline:
         parts += ["", f"Termin dostawy ({deadline}) potwierdzimy po złożeniu zamówienia."]
     if offered:
@@ -149,10 +187,15 @@ def render_reply(
     return "\n".join(parts)
 
 
+def merged_flags(spec: RequestSpec, email_text: str) -> list[str]:
+    # The model's flags plus the pattern check, in case an injection talked the model out of it
+    return merge_flags(spec.flags, find_suspicious(email_text))
+
+
 def process_email(llm, session: Session, email_text: str) -> Offer:
     """The whole agent: extraction and selection by the LLM provider, then validation and saving."""
     spec = llm.extract_request(email_text)
-    questions = clarifying_questions(spec)
+    questions = clarifying_questions(spec, merged_flags(spec, email_text))
     # Unclear lines are not guessed: only clear ones go to product selection
     clear = spec.model_copy(update={"lines": [line for line in spec.lines if line.is_clear]})
     selection = llm.select_products(session, clear) if clear.lines else Selection(choices=[])
@@ -168,6 +211,7 @@ def create_offer(
 ) -> Offer:
     """spec holds only the clear lines; questions cover the rest."""
     lines = validate_selection(session, spec, selection)
+    flags = merged_flags(spec, email_text)
     total = sum(
         (line.unit_price * line.quantity for line in lines if line.item_id is not None),
         Decimal("0.00"),
@@ -178,10 +222,9 @@ def create_offer(
         status=OfferStatus.needs_clarification if questions else OfferStatus.draft,
         availability=availability(lines),
         total=total,
-        reply_draft=render_reply(lines, spec, total, questions),
+        reply_draft=render_reply(lines, spec, total, questions, flags),
         clarifying_questions=list(questions),
-        # The model's flags plus the pattern check, in case an injection talked the model out of it
-        flags=merge_flags(spec.flags, find_suspicious(email_text)),
+        flags=flags,
     )
     session.add(offer)
     session.flush()  # assigns offer.id for the lines
@@ -202,12 +245,20 @@ OPEN_STATUSES = (OfferStatus.draft, OfferStatus.needs_clarification)
 
 def decide(session: Session, offer: Offer, approve: bool, reason: str | None = None) -> Offer:
     """Approves or rejects an offer that is still waiting. A decision is final."""
-    if offer.status not in OPEN_STATUSES:
+    # One atomic UPDATE: a copy of the offer loaded before another person decided must not win
+    result = session.exec(
+        update(Offer)
+        .where(Offer.id == offer.id, Offer.status.in_(OPEN_STATUSES))
+        .values(
+            status=OfferStatus.approved if approve else OfferStatus.rejected,
+            rejection_reason=None if approve else reason,
+            decided_at=utc_now(),
+        )
+    )
+    if result.rowcount == 0:
+        session.rollback()
+        session.refresh(offer)
         raise OfferAlreadyDecided(f"Oferta ma już status {offer.status.value}.")
-    offer.status = OfferStatus.approved if approve else OfferStatus.rejected
-    offer.rejection_reason = None if approve else reason
-    offer.decided_at = utc_now()
-    session.add(offer)
     session.commit()
     session.refresh(offer)
     return offer

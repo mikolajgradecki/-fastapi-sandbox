@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Nowe zapytanie</h1>
+<p class="muted">Wklej mail od klienta. Agent przygotuje szkic oferty, a Ty go zatwierdzisz albo odrzucisz.</p>
+<form hx-post="/ui/offers" hx-target="#result" hx-disabled-elt="find button" hx-indicator="#working">
+  <label for="email_text">Treść maila</label>
+  <textarea id="email_text" name="email_text" rows="10" maxlength="{{ max_length }}" required></textarea>
+  <button type="submit" class="btn primary">Przygotuj ofertę</button>
+  <p id="working" class="htmx-indicator muted" role="status">Agent pracuje<span class="dots">...</span></p>
+</form>
+<div id="result" aria-live="polite"></div>
+{% endblock %}

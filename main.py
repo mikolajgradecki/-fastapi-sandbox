@@ -1,14 +1,17 @@
 from contextlib import asynccontextmanager
 from decimal import Decimal
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import SQLModel
 
 import ai
 import offers
+import ui
 from catalog import get_item_or_404, search_items
 from database import SessionDep, engine
 from models import (
@@ -128,6 +131,9 @@ def ai_client():
 
 
 AIClientDep = Annotated[object, Depends(ai_client)]
+
+app.include_router(ui.build_router(ai_client))
+app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 
 @app.post("/offers/from-email", status_code=201, response_model=OfferPublic)

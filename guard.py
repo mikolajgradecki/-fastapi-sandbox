@@ -5,6 +5,7 @@ These patterns are the backstop, and safe_text keeps flagged text out of the rep
 """
 
 import re
+import unicodedata
 
 SUSPICIOUS_PATTERNS = [
     # Requests for discounts or free goods
@@ -14,6 +15,13 @@ SUSPICIOUS_PATTERNS = [
     r"\bgratis\w*",
     r"\bza\s+darmo\b",
     r"\bdiscount\w*",
+    r"\bupust\w*",
+    r"\bpromocj\w*",
+    r"\bspecjaln\w*\s+cen\w*",
+    r"\bcen\w*\s+(partnersk|ostateczn|specjaln)\w*",
+    # A price of 0 or 1 is never a real catalog price
+    r"\b[01]\s?(z[łl]|pln)\b",
+    r"\bwystaw\w*\s+ofert\w*\s+za\s+\d",
     r"\bfor\s+free\b",
     r"\d{1,3}\s?%\s*(taniej|off)\b",
     # Instructions aimed at the AI instead of the sales team
@@ -22,6 +30,8 @@ SUSPICIOUS_PATTERNS = [
     r"\binstrukcj\w*\s+(dla|do)\s+(ai|ia|modelu|asystenta|systemu|bota)\b",
     r"\bsystem\w*\s+prompt\w*",
     r"\bjeste[śs]\s+(teraz\s+)?(ai|modelem|asystentem|botem)\b",
+    r"\bdisregard\w*\s+(\w+\s+){0,2}(rules|instructions|prompts?)\b",
+    r"\basystenc\w*",
     r"\bignore\s+(all\s+|any\s+|the\s+)?(previous\s+|prior\s+|above\s+)?(instructions|rules|prompts?)\b",
     r"\byou\s+are\s+(now\s+)?(an?\s+)?(ai|assistant|language\s+model|chatbot)\b",
     r"\bact\s+as\b",
@@ -33,8 +43,26 @@ MAX_FRAGMENT_LENGTH = 160
 MAX_FLAGS = 10
 
 
+# Lookalike letters that would hide a word from the patterns (Cyrillic and Greek to Latin)
+_HOMOGLYPHS = str.maketrans(
+    {
+        "а": "a", "в": "b", "е": "e", "к": "k", "м": "m", "н": "h", "о": "o", "р": "p",
+        "с": "c", "т": "t", "у": "y", "х": "x", "і": "i", "ј": "j", "ѕ": "s",
+        "α": "a", "β": "b", "ε": "e", "ι": "i", "κ": "k", "ν": "v", "ο": "o", "ρ": "p",
+        "τ": "t", "υ": "u", "χ": "x",
+    }
+)
+
+
+def _normalize(text: str) -> str:
+    """For matching only; callers keep the original text."""
+    text = unicodedata.normalize("NFKC", text)
+    text = "".join(char for char in text if unicodedata.category(char) != "Cf")
+    return text.casefold().translate(_HOMOGLYPHS)
+
+
 def is_suspicious(text: str) -> bool:
-    return _PATTERN.search(text) is not None
+    return _PATTERN.search(_normalize(text)) is not None
 
 
 def find_suspicious(text: str) -> list[str]:

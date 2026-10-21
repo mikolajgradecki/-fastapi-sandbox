@@ -1,0 +1,70 @@
+{# Autoescape is on and nothing here uses |safe: e-mail fragments and model text stay plain text #}
+{% if error %}
+<div class="notice notice-error offer-card" role="alert">{{ error }}</div>
+{% else %}
+<article class="card offer-card" id="offer-{{ offer.id }}" hx-target="this" hx-swap="outerHTML">
+  <header class="card-head">
+    <h2>Oferta nr {{ offer.id }}</h2>
+    <span class="badge badge-{{ offer.status.value }}">{{ status_labels[offer.status] }}</span>
+  </header>
+
+  {% if notice %}<div class="notice notice-error" role="alert">{{ notice }}</div>{% endif %}
+
+  {% if offer.flags %}
+  <div class="notice notice-warn" role="alert">
+    <strong>Uwaga: podejrzane fragmenty maila</strong>
+    <ul>{% for flag in offer.flags %}<li>{{ flag }}</li>{% endfor %}</ul>
+  </div>
+  {% endif %}
+
+  {% if offer.lines %}
+  <table>
+    <thead><tr><th>Pozycja</th><th class="num">Ilość</th><th class="num">Cena jedn.</th><th class="num">Suma</th></tr></thead>
+    <tbody>
+    {% for line in offer.lines %}
+      <tr>
+        <td>{{ line.item_name }}{% if line.is_substitute %} <span class="tag">zamiennik</span>{% endif %}
+          {% if line.note %}<div class="muted small">{{ line.note }}</div>{% endif %}</td>
+        <td class="num">{{ line.quantity }}</td>
+        <td class="num">{{ format_pln(line.unit_price) }}</td>
+        <td class="num">{{ format_pln(line.line_total) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% if offer.missing %}
+  <h3>Braki</h3>
+  <ul class="missing">
+    {% for item in offer.missing %}
+    <li>{{ item.requested }} ({{ item.quantity }} szt.)<div class="muted small">{{ item.reason }}</div></li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  {% if offer.clarifying_questions %}
+  <h3>Pytania doprecyzowujące</h3>
+  <ol>{% for question in offer.clarifying_questions %}<li>{{ question }}</li>{% endfor %}</ol>
+  {% endif %}
+
+  <p class="total">Razem netto: <strong>{{ format_pln(offer.total) }}</strong></p>
+
+  <h3>Szkic maila</h3>
+  <pre>{{ offer.reply_draft }}</pre>
+
+  {% if offer.status.value == "rejected" and offer.rejection_reason %}
+  <p class="muted">Powód odrzucenia: {{ offer.rejection_reason }}</p>
+  {% endif %}
+
+  {% if offer.status.value in ("draft", "needs_clarification") %}
+  <div class="actions">
+    <button type="button" class="btn primary" hx-post="/ui/offers/{{ offer.id }}/approve">Zatwierdź</button>
+    <form class="reject" hx-post="/ui/offers/{{ offer.id }}/reject">
+      <input type="text" name="reason" placeholder="Powód odrzucenia" minlength="3" maxlength="500" required aria-label="Powód odrzucenia">
+      <button type="submit" class="btn danger">Odrzuć</button>
+    </form>
+  </div>
+  {% endif %}
+</article>
+{% endif %}
